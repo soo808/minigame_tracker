@@ -36,8 +36,8 @@ async function load() {
         data: ranks,
         smooth: true,
         symbol: "none",
-        lineStyle: { width: 1.5, color: "#58a6ff" },
-        areaStyle: { color: "rgba(88,166,255,0.12)" },
+        lineStyle: { width: 1.5, color: "#2563eb" },
+        areaStyle: { color: "rgba(37,99,235,0.12)" },
       },
     ],
     tooltip: {

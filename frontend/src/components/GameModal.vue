@@ -60,25 +60,27 @@ function renderChart() {
     };
   });
   ec.setOption({
-    color: ["#58a6ff", "#a371f7", "#f0883e"],
-    legend: { textStyle: { color: "#8b949e" }, top: 0 },
+    color: ["#2563eb", "#7c3aed", "#ea580c"],
+    legend: { textStyle: { color: "#475569" }, top: 0 },
     grid: { left: 48, right: 16, top: 36, bottom: 28 },
     tooltip: {
       trigger: "axis",
-      textStyle: { fontSize: 12 },
+      textStyle: { fontSize: 12, color: "#0f172a" },
+      backgroundColor: "#fff",
+      borderColor: "#e2e8f0",
     },
     xAxis: {
       type: "category",
       data: dates,
-      axisLabel: { color: "#8b949e", fontSize: 10 },
+      axisLabel: { color: "#64748b", fontSize: 10 },
     },
     yAxis: {
       type: "value",
       inverse: true,
       name: "名次",
-      nameTextStyle: { color: "#8b949e", fontSize: 11 },
-      axisLabel: { color: "#8b949e" },
-      splitLine: { lineStyle: { color: "#21262d" } },
+      nameTextStyle: { color: "#64748b", fontSize: 11 },
+      axisLabel: { color: "#64748b" },
+      splitLine: { lineStyle: { color: "#e2e8f0" } },
     },
     series,
   });
@@ -127,23 +129,24 @@ onBeforeUnmount(() => {
 .overlay {
   position: fixed;
   inset: 0;
-  background: rgba(1, 4, 9, 0.72);
+  background: rgba(15, 23, 42, 0.45);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 1000;
   padding: 24px;
+  backdrop-filter: blur(4px);
 }
 .panel {
   position: relative;
   width: min(920px, 100%);
   max-height: 90vh;
   overflow: auto;
-  background: #161b22;
-  border: 1px solid #30363d;
+  background: #fff;
+  border: 1px solid #e2e8f0;
   border-radius: 14px;
   padding: 24px 24px 20px;
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 25px 50px -12px rgba(15, 23, 42, 0.2);
 }
 .close {
   position: absolute;
@@ -151,13 +154,13 @@ onBeforeUnmount(() => {
   right: 14px;
   border: none;
   background: transparent;
-  color: #8b949e;
+  color: #64748b;
   font-size: 26px;
   line-height: 1;
   cursor: pointer;
 }
 .close:hover {
-  color: #e6edf3;
+  color: #0f172a;
 }
 .head {
   display: flex;
@@ -170,19 +173,21 @@ onBeforeUnmount(() => {
   height: 72px;
   border-radius: 16px;
   object-fit: cover;
+  border: 1px solid #e2e8f0;
 }
 .big-icon.ph {
-  background: #21262d;
+  background: #f1f5f9;
 }
 h2 {
   margin: 0 0 6px;
   font-size: 1.35rem;
   font-weight: 700;
+  color: #0f172a;
 }
 .dev {
   margin: 0;
   font-size: 13px;
-  color: #8b949e;
+  color: #64748b;
 }
 .tags {
   margin-top: 8px;
@@ -194,13 +199,14 @@ h2 {
   font-size: 11px;
   padding: 3px 8px;
   border-radius: 6px;
-  background: #21262d;
-  color: #8b949e;
+  background: #f1f5f9;
+  color: #475569;
+  border: 1px solid #e2e8f0;
 }
 .section-title {
   margin: 20px 0 8px;
   font-size: 13px;
-  color: #8b949e;
+  color: #64748b;
 }
 .chart {
   width: 100%;

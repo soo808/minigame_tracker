@@ -31,25 +31,24 @@ const emit = defineEmits<{ pick: [appid: string] }>();
 
 <style scoped>
 .col {
-  background: rgba(22, 27, 34, 0.65);
-  border: 1px solid #30363d;
+  background: #fff;
+  border: 1px solid #e2e8f0;
   border-radius: 12px;
   min-height: 200px;
   display: flex;
   flex-direction: column;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
 }
 .hdr {
   padding: 12px 14px;
   font-size: 13px;
   font-weight: 700;
   letter-spacing: 0.02em;
-  color: #e6edf3;
-  border-bottom: 1px solid #30363d;
-  background: rgba(13, 17, 23, 0.5);
+  color: #0f172a;
+  border-bottom: 1px solid #e2e8f0;
+  background: #f8fafc;
 }
 .list {
   padding: 6px 4px 12px;
-  max-height: min(72vh, 900px);
-  overflow-y: auto;
 }
 </style>

@@ -158,6 +158,7 @@ watch(selectedDate, () => {
   max-width: 1280px;
   margin: 0 auto;
   padding: 24px 20px 48px;
+  background: #ffffff;
 }
 .top {
   margin-bottom: 20px;
@@ -167,6 +168,7 @@ h1 {
   font-size: 1.5rem;
   font-weight: 800;
   letter-spacing: -0.02em;
+  color: #0f172a;
 }
 .tabs {
   display: flex;
@@ -176,16 +178,16 @@ h1 {
 .tabs button {
   padding: 8px 16px;
   border-radius: 8px;
-  border: 1px solid #30363d;
-  background: #161b22;
-  color: #8b949e;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  color: #64748b;
   font-weight: 600;
   cursor: pointer;
 }
 .tabs button.on {
-  border-color: #58a6ff;
-  color: #e6edf3;
-  background: rgba(88, 166, 255, 0.12);
+  border-color: #2563eb;
+  color: #1d4ed8;
+  background: rgba(37, 99, 235, 0.08);
 }
 .date-row {
   display: flex;
@@ -195,32 +197,37 @@ h1 {
 }
 .date-row label {
   font-size: 13px;
-  color: #8b949e;
+  color: #475569;
+  font-weight: 500;
 }
 .date-row select {
   margin-left: 8px;
   padding: 6px 10px;
   border-radius: 6px;
-  border: 1px solid #30363d;
-  background: #0d1117;
-  color: #e6edf3;
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  color: #0f172a;
 }
 .ghost {
   padding: 6px 12px;
   border-radius: 6px;
-  border: 1px solid #30363d;
-  background: transparent;
-  color: #58a6ff;
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  color: #2563eb;
   cursor: pointer;
   font-weight: 600;
 }
+.ghost:hover {
+  border-color: #2563eb;
+  background: rgba(37, 99, 235, 0.06);
+}
 .muted {
   font-size: 13px;
-  color: #8b949e;
+  color: #64748b;
 }
 .err {
   font-size: 13px;
-  color: #f85149;
+  color: #dc2626;
 }
 .grid {
   display: grid;
@@ -233,7 +240,7 @@ h1 {
   }
 }
 .empty {
-  color: #8b949e;
+  color: #64748b;
   font-size: 14px;
 }
 </style>

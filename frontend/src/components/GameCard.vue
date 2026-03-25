@@ -92,8 +92,8 @@ function deltaClass(): string {
   transition: background 0.15s, border-color 0.15s;
 }
 .card:hover {
-  background: rgba(88, 166, 255, 0.06);
-  border-color: rgba(88, 166, 255, 0.2);
+  background: rgba(59, 130, 246, 0.08);
+  border-color: rgba(37, 99, 235, 0.25);
 }
 .card.dropped {
   opacity: 0.55;
@@ -102,11 +102,11 @@ function deltaClass(): string {
   width: 22px;
   font-weight: 700;
   font-size: 13px;
-  color: #8b949e;
+  color: #64748b;
   flex-shrink: 0;
 }
 .rank.dim {
-  color: #484f58;
+  color: #94a3b8;
 }
 .icon {
   width: 40px;
@@ -114,9 +114,11 @@ function deltaClass(): string {
   border-radius: 10px;
   object-fit: cover;
   flex-shrink: 0;
+  border: 1px solid #e2e8f0;
 }
 .icon.placeholder {
-  background: #21262d;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
 }
 .main {
   flex: 1;
@@ -131,12 +133,12 @@ function deltaClass(): string {
 .name {
   font-weight: 600;
   font-size: 14px;
-  color: #e6edf3;
+  color: #0f172a;
   line-height: 1.3;
 }
 .sub {
   font-size: 12px;
-  color: #8b949e;
+  color: #64748b;
   margin-top: 2px;
 }
 .tags {
@@ -149,8 +151,9 @@ function deltaClass(): string {
   font-size: 11px;
   padding: 2px 6px;
   border-radius: 4px;
-  background: #21262d;
-  color: #8b949e;
+  background: #f1f5f9;
+  color: #475569;
+  border: 1px solid #e2e8f0;
 }
 .pill {
   font-size: 10px;
@@ -159,12 +162,12 @@ function deltaClass(): string {
   border-radius: 4px;
 }
 .pill.new {
-  background: rgba(46, 160, 67, 0.25);
-  color: #3fb950;
+  background: rgba(22, 163, 74, 0.12);
+  color: #15803d;
 }
 .pill.out {
-  background: rgba(139, 148, 158, 0.2);
-  color: #8b949e;
+  background: #f1f5f9;
+  color: #64748b;
 }
 .delta {
   font-size: 12px;
@@ -172,10 +175,10 @@ function deltaClass(): string {
   margin-left: 4px;
 }
 .delta.up {
-  color: #3fb950;
+  color: #15803d;
 }
 .delta.down {
-  color: #f85149;
+  color: #dc2626;
 }
 .spark-wrap {
   flex-shrink: 0;
