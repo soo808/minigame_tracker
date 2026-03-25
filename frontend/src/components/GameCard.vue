@@ -13,12 +13,17 @@ export type GameEntry = {
   rank_delta: number | null;
 };
 
-const props = defineProps<{
-  entry: GameEntry;
-  platform: "wx" | "dy";
-  chart: string;
-  endDate?: string | null;
-}>();
+const props = withDefaults(
+  defineProps<{
+    entry: GameEntry;
+    platform: "wx" | "dy";
+    chart: string;
+    endDate?: string | null;
+    /** 与同行三列对齐时拉满网格行高 */
+    fillRow?: boolean;
+  }>(),
+  { fillRow: false },
+);
 
 const emit = defineEmits<{ click: [] }>();
 
@@ -40,7 +45,7 @@ function deltaClass(): string {
 <template>
   <div
     class="card"
-    :class="{ dropped: entry.is_dropped }"
+    :class="{ dropped: entry.is_dropped, fillRow }"
     @click="emit('click')"
   >
     <span v-if="entry.rank != null" class="rank">{{ entry.rank }}</span>
@@ -182,6 +187,23 @@ function deltaClass(): string {
 }
 .spark-wrap {
   flex-shrink: 0;
+  align-self: center;
+}
+
+.card.fillRow {
+  align-self: stretch;
+  width: 100%;
+  height: 100%;
+  min-height: 100%;
+  box-sizing: border-box;
+}
+
+.card.fillRow .main {
+  flex: 1;
+  min-height: 0;
+}
+
+.card.fillRow .spark-wrap {
   align-self: center;
 }
 </style>

@@ -4,6 +4,7 @@ import { apiUrl } from "../config";
 import type { GameEntry } from "../components/GameCard.vue";
 import GameModal from "../components/GameModal.vue";
 import RankColumn from "../components/RankColumn.vue";
+import RankingsSyncedGrid from "../components/RankingsSyncedGrid.vue";
 
 const platform = ref<"wx" | "dy">("wx");
 const dates = ref<string[]>([]);
@@ -30,6 +31,10 @@ const dyCols = [
 ] as const;
 
 const cols = computed(() => (platform.value === "wx" ? wxCols : dyCols));
+
+function droppedOnly(list: GameEntry[] | undefined): GameEntry[] {
+  return (list ?? []).filter((e) => e.is_dropped);
+}
 
 function readPlatformFromUrl() {
   const q = new URLSearchParams(window.location.search).get("platform");
@@ -131,18 +136,30 @@ watch(selectedDate, () => {
       </div>
     </header>
 
-    <div v-if="payload && payload.date" class="grid">
-      <RankColumn
-        v-for="c in cols"
-        :key="c.key"
-        :title="c.title"
-        :entries="payload.charts[c.key]?.entries || []"
+    <template v-if="payload && payload.date">
+      <RankingsSyncedGrid
+        :cols="cols"
+        :charts="payload.charts"
         :platform="platform"
-        :chart="c.chart"
         :end-date="payload.date"
         @pick="modalAppid = $event"
       />
-    </div>
+      <div class="dropped-wrap">
+        <p class="dropped-hint">跌出榜（仅当日有跌出记录时显示）</p>
+        <div class="grid dropped-grid">
+          <RankColumn
+            v-for="c in cols"
+            :key="c.key"
+            :title="c.title"
+            :entries="droppedOnly(payload.charts[c.key]?.entries)"
+            :platform="platform"
+            :chart="c.chart"
+            :end-date="payload.date"
+            @pick="modalAppid = $event"
+          />
+        </div>
+      </div>
+    </template>
     <p v-else-if="!loading" class="empty">暂无数据。启动后端并完成采集或 POST /api/ingest。</p>
 
     <GameModal
@@ -233,6 +250,18 @@ h1 {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 14px;
+}
+.dropped-wrap {
+  margin-top: 28px;
+}
+.dropped-hint {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #64748b;
+}
+.dropped-grid {
+  align-items: start;
 }
 @media (max-width: 1024px) {
   .grid {
