@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from backend import db
+from backend import media_cache
 from backend.analyzer import status as analyzer_status
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,9 @@ INGEST_CHART_TO_DB: dict[tuple[str, str], str] = {
     ("dy", "renqi"): "popularity",
     ("dy", "changxiao"): "bestseller",
     ("dy", "xinyou"): "fresh_game",
+    ("yyb", "popular"): "popular",
+    ("yyb", "bestseller"): "bestseller",
+    ("yyb", "new_game"): "new_game",
 }
 
 def normalize_tags(tags: Any) -> str | None:
@@ -122,3 +126,5 @@ def apply_chart_payload(
         analyzer_status.maybe_run_analysis_after_snapshot(date)
     except Exception:
         logger.exception("analyzer failed after ingest for date=%s", date)
+
+    media_cache.schedule_prefetch_icons([g.get("icon_url") for g in games])

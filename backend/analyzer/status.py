@@ -17,6 +17,12 @@ REQUIRED_CHARTS = {
     ("dy", "fresh_game"),
 }
 
+YYB_REQUIRED_CHARTS = {
+    ("yyb", "popular"),
+    ("yyb", "bestseller"),
+    ("yyb", "new_game"),
+}
+
 
 def _parse_date(s: str) -> datetime:
     return datetime.strptime(s, "%Y-%m-%d")
@@ -36,19 +42,37 @@ def maybe_run_analysis_after_snapshot(date: str) -> None:
             (date,),
         ).fetchall()
     received = {(r["platform"], r["chart"]) for r in rows}
-    if received == REQUIRED_CHARTS:
+
+    if REQUIRED_CHARTS <= received:
         run_analysis(date)
+
+    if YYB_REQUIRED_CHARTS <= received:
+        run_analysis(date, YYB_REQUIRED_CHARTS)
+        _run_yyb_tag_analysis(date)
+
+
+def _run_yyb_tag_analysis(date: str) -> None:
+    try:
+        from backend.analyzer.yyb_tags import run_yyb_tag_analysis
+
+        run_yyb_tag_analysis(date)
+    except Exception:
+        logger.exception("yyb_tags analysis failed for date=%s", date)
 
 
 def run_analysis(date: str, charts: set | None = None) -> None:
-    """Recompute daily_status for `date` for all REQUIRED charts (or subset for tests)."""
-    target = REQUIRED_CHARTS if charts is None else (charts & REQUIRED_CHARTS)
+    """Recompute daily_status for `date` for all REQUIRED charts (or explicit subset)."""
+    target = REQUIRED_CHARTS if charts is None else charts
     d0 = _parse_date(date)
     yday = _fmt_date(d0 - timedelta(days=1))
     week_start = _fmt_date(d0 - timedelta(days=7))
 
     with db.get_conn() as conn:
-        conn.execute("DELETE FROM daily_status WHERE date = ?", (date,))
+        for platform, chart in target:
+            conn.execute(
+                "DELETE FROM daily_status WHERE date = ? AND platform = ? AND chart = ?",
+                (date, platform, chart),
+            )
 
         for platform, chart in target:
             cur_t = conn.execute(

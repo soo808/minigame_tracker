@@ -17,7 +17,7 @@ class IngestGame(BaseModel):
 
 class IngestBody(BaseModel):
     date: str
-    platform: str = Field(pattern="^(wx|dy)$")
+    platform: str = Field(pattern="^(wx|dy|yyb)$")
     chart: str  # renqi | changwan | changxiao | xinyou
     games: list[IngestGame]
 

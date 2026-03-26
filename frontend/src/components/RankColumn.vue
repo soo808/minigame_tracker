@@ -4,7 +4,7 @@ import GameCard, { type GameEntry } from "./GameCard.vue";
 defineProps<{
   title: string;
   entries: GameEntry[];
-  platform: "wx" | "dy";
+  platform: "wx" | "dy" | "yyb";
   chart: string;
   endDate?: string | null;
 }>();

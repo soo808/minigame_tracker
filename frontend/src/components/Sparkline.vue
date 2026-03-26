@@ -5,7 +5,7 @@ import { apiUrl } from "../config";
 
 const props = defineProps<{
   appid: string;
-  platform: "wx" | "dy";
+  platform: "wx" | "dy" | "yyb";
   dbChart: string;
   endDate?: string | null;
 }>();

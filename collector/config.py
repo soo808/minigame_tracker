@@ -35,3 +35,28 @@ def gravity_genre_to_platform(rank_genre: str) -> str:
 
 def rank_type_to_db_chart(platform: str, rank_type: str) -> str:
     return rank_type  # DB 直接使用 popularity / bestseller / most_played / fresh_game
+
+
+# ── YYB 腾讯应用宝 ─────────────────────────────────────────────────────────
+YYB_GUID: str = os.getenv("YYB_GUID", "91b8f8b5-de10-46a4-b128-81f31fc100ae").strip()
+YYB_PROXY_URL: str | None = os.getenv("YYB_PROXY_URL", None) or None
+
+YYB_API_URL = "https://yybadaccess.3g.qq.com/v2/dc_pcyyb_official"
+
+YYB_CHARTS: list[dict] = [
+    {
+        "chart_id": "popular",
+        "layout": "wechat-popularrank-game-list",
+        "exp_scene_ids": "",
+    },
+    {
+        "chart_id": "bestseller",
+        "layout": "wechat-bestsellrank-game-list",
+        "exp_scene_ids": "92250",
+    },
+    {
+        "chart_id": "new_game",
+        "layout": "wechat-newrank-game-list",
+        "exp_scene_ids": "",
+    },
+]

@@ -6,7 +6,7 @@ import GameModal from "../components/GameModal.vue";
 import RankColumn from "../components/RankColumn.vue";
 import RankingsSyncedGrid from "../components/RankingsSyncedGrid.vue";
 
-const platform = ref<"wx" | "dy">("wx");
+const platform = ref<"wx" | "dy" | "yyb">("wx");
 const dates = ref<string[]>([]);
 const selectedDate = ref<string | null>(null);
 const payload = ref<{
@@ -30,7 +30,15 @@ const dyCols = [
   { key: "xinyou", title: "抖音 · 新游榜", chart: "fresh_game" },
 ] as const;
 
-const cols = computed(() => (platform.value === "wx" ? wxCols : dyCols));
+const yybCols = [
+  { key: "popular", title: "应用宝 · 热门榜", chart: "popular" },
+  { key: "bestseller", title: "应用宝 · 畅销榜", chart: "bestseller" },
+  { key: "new_game", title: "应用宝 · 新游榜", chart: "new_game" },
+] as const;
+
+const cols = computed(() =>
+  platform.value === "wx" ? wxCols : platform.value === "dy" ? dyCols : yybCols
+);
 
 function droppedOnly(list: GameEntry[] | undefined): GameEntry[] {
   return (list ?? []).filter((e) => e.is_dropped);
@@ -38,7 +46,7 @@ function droppedOnly(list: GameEntry[] | undefined): GameEntry[] {
 
 function readPlatformFromUrl() {
   const q = new URLSearchParams(window.location.search).get("platform");
-  if (q === "dy" || q === "wx") platform.value = q;
+  if (q === "dy" || q === "wx" || q === "yyb") platform.value = q;
 }
 
 function writePlatformToUrl() {
@@ -121,6 +129,13 @@ watch(selectedDate, () => {
           @click="platform = 'dy'"
         >
           抖音小游戏
+        </button>
+        <button
+          type="button"
+          :class="{ on: platform === 'yyb' }"
+          @click="platform = 'yyb'"
+        >
+          腾讯应用宝
         </button>
       </div>
       <div class="date-row">

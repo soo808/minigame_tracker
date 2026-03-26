@@ -7,14 +7,23 @@ export type ChartCol = { key: string; title: string; chart: string };
 const props = defineProps<{
   cols: readonly ChartCol[];
   charts: Record<string, { entries: GameEntry[] }>;
-  platform: "wx" | "dy";
+  platform: "wx" | "dy" | "yyb";
   endDate: string | null;
 }>();
 
 const emit = defineEmits<{ pick: [appid: string] }>();
 
-const RANKS = Array.from({ length: 100 }, (_, i) => i + 1);
-const ZONE_AFTER = new Set([10, 30, 50, 100]);
+/** YYB 每榜最多 200；wx/dy 仍为 100 行网格 */
+const ranks = computed(() => {
+  const n = props.platform === "yyb" ? 200 : 100;
+  return Array.from({ length: n }, (_, i) => i + 1);
+});
+
+const zoneAfter = computed(() => {
+  const s = new Set([10, 30, 50, 100]);
+  if (props.platform === "yyb") s.add(200);
+  return s;
+});
 
 const rankMaps = computed(() => {
   const out: Record<string, Map<number, GameEntry>> = {};
@@ -46,7 +55,7 @@ function getEntry(chartKey: string, rank: number): GameEntry | undefined {
       </header>
     </div>
 
-    <template v-for="r in RANKS" :key="r">
+    <template v-for="r in ranks" :key="r">
       <div class="rank-row">
         <div
           v-for="c in cols"
@@ -66,7 +75,7 @@ function getEntry(chartKey: string, rank: number): GameEntry | undefined {
         </div>
       </div>
       <div
-        v-if="ZONE_AFTER.has(r)"
+        v-if="zoneAfter.has(r)"
         class="zone-break-full"
         aria-hidden="true"
       />

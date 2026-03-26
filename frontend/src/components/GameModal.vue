@@ -2,10 +2,11 @@
 import * as echarts from "echarts";
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { apiUrl } from "../config";
+import { resolveIconSrc } from "../iconSrc";
 
 const props = defineProps<{
   appid: string | null;
-  platform: "wx" | "dy";
+  platform: "wx" | "dy" | "yyb";
 }>();
 
 const emit = defineEmits<{ close: [] }>();
@@ -109,7 +110,7 @@ onBeforeUnmount(() => {
         ×
       </button>
       <div class="head">
-        <img v-if="icon" class="big-icon" :src="icon" alt="" />
+        <img v-if="icon" class="big-icon" :src="resolveIconSrc(icon)" alt="" />
         <div v-else class="big-icon ph" />
         <div>
           <h2>{{ title }}</h2>

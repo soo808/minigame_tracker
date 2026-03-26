@@ -40,6 +40,8 @@ def rank_series(
 def charts_for_platform(platform: str) -> list[str]:
     if platform == "wx":
         return ["popularity", "most_played", "bestseller"]
+    if platform == "yyb":
+        return ["popular", "bestseller", "new_game"]
     return ["popularity", "bestseller", "fresh_game"]
 
 

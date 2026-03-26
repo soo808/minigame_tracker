@@ -8,15 +8,17 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
 from backend import db
+from backend import media_cache
 from backend.analyzer import trends
 from backend.ingest_service import apply_chart_payload, map_ingest_chart
 from backend.models import IngestBody
-from collector.scheduler import shutdown_scheduler, start_scheduler
+from collector.scheduler import collect_yyb_charts, shutdown_scheduler, start_scheduler
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -45,6 +47,12 @@ def _charts_for_api(platform: str) -> list[tuple[str, str]]:
             ("renqi", "popularity"),
             ("changxiao", "bestseller"),
             ("changwan", "most_played"),
+        ]
+    if platform == "yyb":
+        return [
+            ("popular", "popular"),
+            ("bestseller", "bestseller"),
+            ("new_game", "new_game"),
         ]
     return [
         ("renqi", "popularity"),
@@ -108,15 +116,32 @@ def api_dates(platform: str | None = None):
     return {"dates": [r["date"] for r in rows]}
 
 
+@app.get("/api/media/{sha256_hex}")
+def api_serve_media(sha256_hex: str):
+    h = sha256_hex.lower().strip()
+    if not media_cache.SHA256_RE.match(h):
+        raise HTTPException(400, "invalid sha256")
+    pair = media_cache.ensure_file_and_mime(h)
+    if not pair:
+        raise HTTPException(404, "not found")
+    path, mime = pair
+    return FileResponse(
+        path,
+        media_type=mime or "application/octet-stream",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 @app.get("/api/rankings")
 def api_rankings(
-    platform: str = Query("wx", pattern="^(wx|dy)$"),
+    platform: str = Query("wx", pattern="^(wx|dy|yyb)$"),
     date: str | None = None,
 ):
     with db.get_conn() as conn:
         d = date or _latest_date(conn, platform)
         if not d:
-            return {"date": None, "platform": platform, "charts": {}}
+            charts_empty = {api_key: {"entries": []} for api_key, _ in _charts_for_api(platform)}
+            return {"date": None, "platform": platform, "charts": charts_empty}
         charts_out: dict = {}
         for api_key, db_chart in _charts_for_api(platform):
             rows = conn.execute(
@@ -155,7 +180,7 @@ def api_rankings(
                         "rank": int(r["rank"]),
                         "appid": r["appid"],
                         "name": r["name"],
-                        "icon_url": r["icon_url"],
+                        "icon_url": media_cache.rewrite_icon_url(conn, r["icon_url"]),
                         "developer": r["developer"],
                         "tags": _parse_tags(r["tags"]),
                         "is_new": bool(r["is_new"]),
@@ -169,7 +194,7 @@ def api_rankings(
                         "rank": None,
                         "appid": r["appid"],
                         "name": r["name"],
-                        "icon_url": r["icon_url"],
+                        "icon_url": media_cache.rewrite_icon_url(conn, r["icon_url"]),
                         "developer": r["developer"],
                         "tags": _parse_tags(r["tags"]),
                         "is_new": bool(r["is_new"]),
@@ -185,25 +210,28 @@ def api_rankings(
 def api_game(
     appid: str,
     days: int = Query(30, ge=1, le=90),
-    platform: str = Query("wx", pattern="^(wx|dy)$"),
+    platform: str = Query("wx", pattern="^(wx|dy|yyb)$"),
 ):
     with db.get_conn() as conn:
         g = conn.execute("SELECT * FROM games WHERE appid = ?", (appid,)).fetchone()
         if not g:
             raise HTTPException(404, "game not found")
+        icon_public = media_cache.rewrite_icon_url(conn, g["icon_url"])
     series = trends.all_charts_series_for_platform(appid, platform, days)
     chart_labels = {
         "popularity": "人气榜",
         "most_played": "畅玩榜",
         "bestseller": "畅销榜",
         "fresh_game": "新游榜",
+        "popular": "热门榜",
+        "new_game": "新游榜",
     }
     return {
         "appid": appid,
         "platform": g["platform"],
         "name": g["name"],
         "description": g["description"],
-        "icon_url": g["icon_url"],
+        "icon_url": icon_public,
         "developer": g["developer"],
         "tags": _parse_tags(g["tags"]),
         "charts": {
@@ -216,8 +244,11 @@ def api_game(
 @app.get("/api/game/{appid}/sparkline")
 def api_sparkline(
     appid: str,
-    chart: str = Query(..., description="DB chart: popularity|bestseller|most_played|fresh_game"),
-    platform: str = Query("wx", pattern="^(wx|dy)$"),
+    chart: str = Query(
+        ...,
+        description="DB chart: popularity|bestseller|most_played|fresh_game|popular|new_game",
+    ),
+    platform: str = Query("wx", pattern="^(wx|dy|yyb)$"),
     days: int = Query(7, ge=1, le=30),
     end_date: str | None = None,
 ):
@@ -245,6 +276,146 @@ def api_ingest(body: IngestBody):
         "manual_ingest",
     )
     return {"ok": True, "count": len(games)}
+
+
+@app.get("/api/collect/yyb")
+async def api_collect_yyb(
+    date: str | None = Query(None),
+    force: bool = Query(False, description="当日已过 11:25 窗口时仍拉取三榜"),
+):
+    import asyncio
+    from datetime import date as date_cls
+
+    collect_date = date or date_cls.today().strftime("%Y-%m-%d")
+    await asyncio.to_thread(collect_yyb_charts, collect_date, force=force)
+
+    with db.get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT chart, status, game_count, note
+            FROM snapshots
+            WHERE date = ? AND platform = 'yyb'
+            """,
+            (collect_date,),
+        ).fetchall()
+
+    return {
+        "date": collect_date,
+        "results": [
+            {
+                "chart": r["chart"],
+                "count": r["game_count"],
+                "status": r["status"],
+                "note": r["note"],
+            }
+            for r in rows
+        ],
+    }
+
+
+@app.get("/api/yyb/insights")
+def api_yyb_insights(
+    date: str | None = Query(None),
+    chart: str = Query("popular", pattern="^(popular|bestseller|new_game)$"),
+):
+    with db.get_conn() as conn:
+        d = date or _latest_date(conn, "yyb")
+        if not d:
+            return {
+                "date": None,
+                "chart": chart,
+                "top_tags": [],
+                "rising_tags": [],
+                "developer_concentration": {},
+                "wx_overlap_rate": None,
+            }
+
+        tag_rows = conn.execute(
+            """
+            SELECT tag, game_count, avg_rank, top10_count
+            FROM yyb_tag_stats
+            WHERE date = ? AND chart = ?
+            ORDER BY game_count DESC
+            LIMIT 20
+            """,
+            (d, chart),
+        ).fetchall()
+
+        rising = conn.execute(
+            """
+            SELECT t.tag
+            FROM yyb_tag_stats t
+            JOIN (
+                SELECT tag, AVG(game_count) AS avg7
+                FROM yyb_tag_stats
+                WHERE chart = ? AND date < ? AND date >= date(?, '-7 days')
+                GROUP BY tag
+            ) h ON h.tag = t.tag
+            WHERE t.date = ? AND t.chart = ?
+              AND t.game_count > h.avg7
+            ORDER BY (t.game_count - h.avg7) DESC
+            LIMIT 5
+            """,
+            (chart, d, d, d, chart),
+        ).fetchall()
+
+        dev_rows = conn.execute(
+            """
+            SELECT g.developer, COUNT(*) AS cnt
+            FROM rankings r
+            JOIN games g ON g.appid = r.appid
+            WHERE r.date = ? AND r.platform = 'yyb' AND r.chart = ?
+              AND g.developer IS NOT NULL AND TRIM(g.developer) != ''
+            GROUP BY g.developer
+            ORDER BY cnt DESC
+            LIMIT 3
+            """,
+            (d, chart),
+        ).fetchall()
+        total_in_chart = conn.execute(
+            "SELECT COUNT(*) AS c FROM rankings WHERE date=? AND platform='yyb' AND chart=?",
+            (d, chart),
+        ).fetchone()["c"]
+        top3_devs = [r["developer"] for r in dev_rows]
+        top3_sum = sum(r["cnt"] for r in dev_rows)
+        top3_share = round(top3_sum / total_in_chart, 4) if total_in_chart > 0 else 0.0
+
+        yyb_appids = {
+            r["appid"]
+            for r in conn.execute(
+                "SELECT appid FROM rankings WHERE date=? AND platform='yyb' AND chart=?",
+                (d, chart),
+            ).fetchall()
+        }
+        wx_appids = {
+            r["appid"]
+            for r in conn.execute(
+                "SELECT appid FROM rankings WHERE date=? AND platform='wx' AND chart='popularity'",
+                (d,),
+            ).fetchall()
+        }
+        overlap = len(yyb_appids & wx_appids)
+        overlap_rate = round(overlap / len(yyb_appids), 4) if yyb_appids else None
+
+    return {
+        "date": d,
+        "chart": chart,
+        "top_tags": [
+            {
+                "tag": r["tag"],
+                "count": r["game_count"],
+                "avg_rank": r["avg_rank"],
+                "top10_count": r["top10_count"],
+            }
+            for r in tag_rows
+        ],
+        "rising_tags": [r["tag"] for r in rising],
+        "developer_concentration": {
+            "top3_developers": top3_devs,
+            "top3_share": top3_share,
+        },
+        "wx_overlap_rate": overlap_rate,
+    }
 
 
 @app.get("/api/status")

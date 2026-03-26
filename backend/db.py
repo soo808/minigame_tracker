@@ -97,5 +97,27 @@ def init_db() -> None:
               note          TEXT,
               UNIQUE(date, platform, chart)
             );
+
+            CREATE TABLE IF NOT EXISTS yyb_tag_stats (
+              date         TEXT    NOT NULL,
+              chart        TEXT    NOT NULL,
+              tag          TEXT    NOT NULL,
+              game_count   INTEGER NOT NULL,
+              avg_rank     REAL,
+              top10_count  INTEGER NOT NULL DEFAULT 0,
+              new_entries  INTEGER NOT NULL DEFAULT 0,
+              PRIMARY KEY (date, chart, tag)
+            );
+
+            CREATE TABLE IF NOT EXISTS media_cache (
+              source_url   TEXT    NOT NULL UNIQUE,
+              sha256       TEXT    NOT NULL,
+              mime         TEXT,
+              byte_size    INTEGER NOT NULL,
+              stored_at    TEXT    NOT NULL,
+              expires_at   TEXT    NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_media_cache_sha ON media_cache(sha256);
+            CREATE INDEX IF NOT EXISTS idx_media_cache_expires ON media_cache(expires_at);
             """
         )

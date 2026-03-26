@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import Sparkline from "./Sparkline.vue";
+import TrendSparkPopover from "./TrendSparkPopover.vue";
+import { resolveIconSrc } from "../iconSrc";
 
 export type GameEntry = {
   rank: number | null;
@@ -16,7 +17,7 @@ export type GameEntry = {
 const props = withDefaults(
   defineProps<{
     entry: GameEntry;
-    platform: "wx" | "dy";
+    platform: "wx" | "dy" | "yyb";
     chart: string;
     endDate?: string | null;
     /** 与同行三列对齐时拉满网格行高 */
@@ -40,6 +41,17 @@ function deltaClass(): string {
   if (d == null) return "";
   return d < 0 ? "up" : "down";
 }
+
+function trendTriggerClass(): string {
+  if (props.entry.is_dropped) return "";
+  if (deltaText()) return deltaClass();
+  return "dash";
+}
+
+function trendTriggerLabel(): string {
+  if (props.entry.is_dropped) return "";
+  return deltaText() ?? "—";
+}
 </script>
 
 <template>
@@ -53,7 +65,7 @@ function deltaClass(): string {
     <img
       v-if="entry.icon_url"
       class="icon"
-      :src="entry.icon_url"
+      :src="resolveIconSrc(entry.icon_url)"
       alt=""
       loading="lazy"
     />
@@ -63,9 +75,6 @@ function deltaClass(): string {
         <span class="name">{{ entry.name }}</span>
         <span v-if="entry.is_new" class="pill new">新</span>
         <span v-if="entry.is_dropped" class="pill out">出</span>
-        <span v-if="deltaText()" class="delta" :class="deltaClass()">{{
-          deltaText()
-        }}</span>
       </div>
       <div v-if="entry.developer" class="sub">{{ entry.developer }}</div>
       <div v-if="entry.tags?.length" class="tags">
@@ -75,11 +84,13 @@ function deltaClass(): string {
       </div>
     </div>
     <div v-if="!entry.is_dropped" class="spark-wrap">
-      <Sparkline
+      <TrendSparkPopover
         :appid="entry.appid"
         :platform="platform"
         :db-chart="chart"
         :end-date="endDate"
+        :trigger-label="trendTriggerLabel()"
+        :trigger-class="trendTriggerClass()"
       />
     </div>
   </div>
@@ -173,17 +184,6 @@ function deltaClass(): string {
 .pill.out {
   background: #f1f5f9;
   color: #64748b;
-}
-.delta {
-  font-size: 12px;
-  font-weight: 600;
-  margin-left: 4px;
-}
-.delta.up {
-  color: #15803d;
-}
-.delta.down {
-  color: #dc2626;
 }
 .spark-wrap {
   flex-shrink: 0;
