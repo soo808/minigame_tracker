@@ -6,6 +6,7 @@ venv/
 node_modules/
 data/*.db
 data/*.db-*
+data/media/
 *.log
 decrypt_sample.json
 gravity_response.txt

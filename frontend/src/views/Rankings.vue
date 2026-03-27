@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from "vue";
 import { apiUrl } from "../config";
 import type { GameEntry } from "../components/GameCard.vue";
 import GameModal from "../components/GameModal.vue";
+import PageScrollFab from "../components/PageScrollFab.vue";
 import RankColumn from "../components/RankColumn.vue";
 import RankingsSyncedGrid from "../components/RankingsSyncedGrid.vue";
 
@@ -182,6 +183,8 @@ watch(selectedDate, () => {
       :platform="platform"
       @close="modalAppid = null"
     />
+
+    <PageScrollFab />
   </div>
 </template>
 
