@@ -1,15 +1,21 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, withDefaults } from "vue";
 import GameCard, { type GameEntry } from "./GameCard.vue";
 
 export type ChartCol = { key: string; title: string; chart: string };
 
-const props = defineProps<{
-  cols: readonly ChartCol[];
-  charts: Record<string, { entries: GameEntry[] }>;
-  platform: "wx" | "dy" | "yyb";
-  endDate: string | null;
-}>();
+const props = withDefaults(
+  defineProps<{
+    cols: readonly ChartCol[];
+    charts: Record<string, { entries: GameEntry[] }>;
+    platform: "wx" | "dy" | "yyb";
+    endDate: string | null;
+    /** sync：按官方名次对齐网格；list：纵向列表（筛选/周月榜） */
+    layoutMode?: "sync" | "list";
+    showTrend?: boolean;
+  }>(),
+  { layoutMode: "sync", showTrend: true },
+);
 
 const emit = defineEmits<{ pick: [appid: string] }>();
 
@@ -44,7 +50,37 @@ function getEntry(chartKey: string, rank: number): GameEntry | undefined {
 </script>
 
 <template>
-  <div class="sync-board">
+  <div v-if="layoutMode === 'list'" class="sync-board list-board">
+    <div class="hdr-row">
+      <header
+        v-for="c in cols"
+        :key="c.key"
+        class="hdr-cell"
+      >
+        {{ c.title }}
+      </header>
+    </div>
+    <div class="list-row">
+      <div
+        v-for="c in cols"
+        :key="c.key"
+        class="list-col"
+      >
+        <GameCard
+          v-for="e in charts[c.key]?.entries ?? []"
+          :key="e.appid"
+          :entry="e"
+          :platform="platform"
+          :chart="c.chart"
+          :end-date="endDate"
+          :show-trend="showTrend"
+          @click="emit('pick', e.appid)"
+        />
+      </div>
+    </div>
+  </div>
+
+  <div v-else class="sync-board">
     <div class="hdr-row">
       <header
         v-for="c in cols"
@@ -68,6 +104,7 @@ function getEntry(chartKey: string, rank: number): GameEntry | undefined {
             :platform="platform"
             :chart="c.chart"
             :end-date="endDate"
+            :show-trend="showTrend"
             fill-row
             @click="emit('pick', getEntry(c.key, r)!.appid)"
           />
@@ -150,6 +187,34 @@ function getEntry(chartKey: string, rank: number): GameEntry | undefined {
   border-top: 1px dashed #94a3b8;
   margin: 0;
   opacity: 0.9;
+}
+
+.list-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 0;
+}
+
+.list-col {
+  min-width: 0;
+  border-right: 1px solid #f1f5f9;
+  padding: 6px 4px 12px;
+}
+
+.list-col:last-child {
+  border-right: none;
+}
+
+@media (max-width: 1024px) {
+  .list-row {
+    grid-template-columns: 1fr;
+  }
+
+  .list-col {
+    border-right: none;
+    border-bottom: 1px solid #f1f5f9;
+  }
 }
 
 @media (max-width: 1024px) {

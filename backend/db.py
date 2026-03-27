@@ -121,3 +121,11 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_media_cache_expires ON media_cache(expires_at);
             """
         )
+        for col, typedef in (
+            ("genre_major", "TEXT"),
+            ("genre_minor", "TEXT"),
+        ):
+            try:
+                conn.execute(f"ALTER TABLE games ADD COLUMN {col} {typedef}")
+            except sqlite3.OperationalError:
+                pass

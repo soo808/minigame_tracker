@@ -1,0 +1,1 @@
+import{_ as e,j as c,c as o}from"./index-2mJED6Wx.js";const s={},t={class:"placeholder"};function _(a,r){return c(),o("div",t,"AI 问答（待实现）")}const d=e(s,[["render",_],["__scopeId","data-v-84322b2e"]]);export{d as default};

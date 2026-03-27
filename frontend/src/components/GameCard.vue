@@ -9,6 +9,10 @@ export type GameEntry = {
   icon_url?: string | null;
   developer?: string | null;
   tags?: string[] | null;
+  genre_major?: string | null;
+  genre_minor?: string | null;
+  /** 分类筛选/聚合视图下的展示序号（优先于 rank） */
+  display_rank?: number;
   is_new: boolean;
   is_dropped: boolean;
   rank_delta: number | null;
@@ -22,9 +26,16 @@ const props = withDefaults(
     endDate?: string | null;
     /** 与同行三列对齐时拉满网格行高 */
     fillRow?: boolean;
+    /** 周/月榜或筛选列表：不展示趋势区 */
+    showTrend?: boolean;
   }>(),
-  { fillRow: false },
+  { fillRow: false, showTrend: true },
 );
+
+function rankLabel(): number | null {
+  if (props.entry.display_rank != null) return props.entry.display_rank;
+  return props.entry.rank;
+}
 
 const emit = defineEmits<{ click: [] }>();
 
@@ -60,7 +71,7 @@ function trendTriggerLabel(): string {
     :class="{ dropped: entry.is_dropped, fillRow }"
     @click="emit('click')"
   >
-    <span v-if="entry.rank != null" class="rank">{{ entry.rank }}</span>
+    <span v-if="rankLabel() != null" class="rank">{{ rankLabel() }}</span>
     <span v-else class="rank dim">—</span>
     <img
       v-if="entry.icon_url"
@@ -83,7 +94,7 @@ function trendTriggerLabel(): string {
         }}</span>
       </div>
     </div>
-    <div v-if="!entry.is_dropped" class="spark-wrap">
+    <div v-if="showTrend && !entry.is_dropped" class="spark-wrap">
       <TrendSparkPopover
         :appid="entry.appid"
         :platform="platform"

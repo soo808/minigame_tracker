@@ -19,6 +19,9 @@ const title = ref("");
 const developer = ref("");
 const icon = ref<string | null>(null);
 const tags = ref<string[]>([]);
+const description = ref("");
+const genreMajor = ref("");
+const genreMinor = ref("");
 const chartPayload = ref<Record<string, { label: string; series: { date: string; rank: number }[] }>>({});
 
 async function load() {
@@ -33,6 +36,9 @@ async function load() {
   developer.value = data.developer || "";
   icon.value = data.icon_url;
   tags.value = Array.isArray(data.tags) ? data.tags : [];
+  description.value = data.description || "";
+  genreMajor.value = data.genre_major || "";
+  genreMinor.value = data.genre_minor || "";
   chartPayload.value = data.charts || {};
   renderChart();
 }
@@ -118,6 +124,11 @@ onBeforeUnmount(() => {
           <div v-if="tags.length" class="tags">
             <span v-for="(t, i) in tags" :key="i" class="tag">{{ t }}</span>
           </div>
+          <p v-if="genreMajor || genreMinor" class="genre-line">
+            <span v-if="genreMajor">大类：{{ genreMajor }}</span>
+            <span v-if="genreMinor"> · 小类：{{ genreMinor }}</span>
+          </p>
+          <p v-if="description" class="desc">{{ description }}</p>
         </div>
       </div>
       <p class="section-title">近 30 日排名走势</p>
@@ -203,6 +214,17 @@ h2 {
   background: #f1f5f9;
   color: #475569;
   border: 1px solid #e2e8f0;
+}
+.genre-line {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #475569;
+}
+.desc {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: #334155;
+  line-height: 1.5;
 }
 .section-title {
   margin: 20px 0 8px;

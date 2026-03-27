@@ -4,7 +4,10 @@ from __future__ import annotations
 import json
 import logging
 from contextlib import asynccontextmanager
+from datetime import date as date_cls
+from datetime import timedelta
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,9 +19,11 @@ from starlette.requests import Request
 from backend import db
 from backend import media_cache
 from backend.analyzer import trends
+from backend.analyzer.classify import classify_games_batch
 from backend.ingest_service import apply_chart_payload, map_ingest_chart
 from backend.models import IngestBody
 from collector.scheduler import collect_yyb_charts, shutdown_scheduler, start_scheduler
+from collector.yyb_detail import collect_detail_batch
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -80,6 +85,18 @@ def _parse_tags(raw: str | None) -> list | None:
         return v if isinstance(v, list) else [raw]
     except json.JSONDecodeError:
         return [raw]
+
+
+def _tags_split(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return [str(t).strip() for t in parsed if t]
+    except (ValueError, TypeError, json.JSONDecodeError):
+        pass
+    return [t.strip() for t in raw.split(",") if t.strip()]
 
 
 @asynccontextmanager
@@ -147,6 +164,7 @@ def api_rankings(
             rows = conn.execute(
                 """
                 SELECT r.rank, r.appid, g.name, g.icon_url, g.developer, g.tags,
+                       g.genre_major, g.genre_minor,
                        COALESCE(ds.is_new, 0) AS is_new,
                        COALESCE(ds.is_dropped, 0) AS is_dropped,
                        ds.rank_delta AS rank_delta
@@ -163,6 +181,7 @@ def api_rankings(
             dropped = conn.execute(
                 """
                 SELECT ds.appid, g.name, g.icon_url, g.developer, g.tags,
+                       g.genre_major, g.genre_minor,
                        ds.is_new, ds.is_dropped, ds.rank_delta
                 FROM daily_status ds
                 JOIN games g ON g.appid = ds.appid
@@ -183,6 +202,8 @@ def api_rankings(
                         "icon_url": media_cache.rewrite_icon_url(conn, r["icon_url"]),
                         "developer": r["developer"],
                         "tags": _parse_tags(r["tags"]),
+                        "genre_major": r["genre_major"],
+                        "genre_minor": r["genre_minor"],
                         "is_new": bool(r["is_new"]),
                         "is_dropped": bool(r["is_dropped"]),
                         "rank_delta": r["rank_delta"],
@@ -197,6 +218,8 @@ def api_rankings(
                         "icon_url": media_cache.rewrite_icon_url(conn, r["icon_url"]),
                         "developer": r["developer"],
                         "tags": _parse_tags(r["tags"]),
+                        "genre_major": r["genre_major"],
+                        "genre_minor": r["genre_minor"],
                         "is_new": bool(r["is_new"]),
                         "is_dropped": True,
                         "rank_delta": r["rank_delta"],
@@ -234,6 +257,8 @@ def api_game(
         "icon_url": icon_public,
         "developer": g["developer"],
         "tags": _parse_tags(g["tags"]),
+        "genre_major": g["genre_major"],
+        "genre_minor": g["genre_minor"],
         "charts": {
             k: {"label": chart_labels.get(k, k), "series": v}
             for k, v in series.items()
@@ -276,6 +301,16 @@ def api_ingest(body: IngestBody):
         "manual_ingest",
     )
     return {"ok": True, "count": len(games)}
+
+
+@app.get("/api/collect/detail")
+async def api_collect_detail(
+    ai_fallback: bool = Query(True, description="抓取失败时是否调用 DeepSeek 生成描述"),
+):
+    import asyncio
+
+    result = await asyncio.to_thread(collect_detail_batch, ai_fallback)
+    return result
 
 
 @app.get("/api/collect/yyb")
@@ -438,6 +473,224 @@ def api_status(date: str | None = None):
     return {
         "date": d,
         "snapshots": [dict(r) for r in rows],
+    }
+
+
+@app.get("/api/classify/run")
+async def api_classify_run(force: bool = Query(False)):
+    import asyncio
+
+    result = await asyncio.to_thread(classify_games_batch, force)
+    return result
+
+
+@app.get("/api/rankings/aggregate")
+def api_rankings_aggregate(
+    platform: str = Query(..., pattern="^(wx|dy|yyb)$"),
+    time_range: Literal["week", "month"] = Query(..., alias="range"),
+    end_date: str | None = None,
+):
+    days = 7 if time_range == "week" else 30
+    with db.get_conn() as conn:
+        end = end_date or _latest_date(conn, platform) or date_cls.today().isoformat()
+    end_dt = date_cls.fromisoformat(end)
+    start_dt = end_dt - timedelta(days=days - 1)
+    start = start_dt.isoformat()
+    end = end_dt.isoformat()
+
+    with db.get_conn() as conn:
+        chart_rows = conn.execute(
+            "SELECT DISTINCT chart FROM rankings WHERE platform=? AND date BETWEEN ? AND ?",
+            (platform, start, end),
+        ).fetchall()
+        charts = [r["chart"] for r in chart_rows]
+
+        result_charts: dict = {}
+        for chart in charts:
+            rows = conn.execute(
+                """
+                SELECT
+                    r.appid,
+                    g.name,
+                    g.icon_url,
+                    g.developer,
+                    g.genre_major,
+                    g.tags,
+                    ROUND(AVG(r.rank), 1) AS avg_rank,
+                    COUNT(r.rank) AS appearances
+                FROM rankings r
+                JOIN games g ON g.appid = r.appid
+                WHERE r.platform = ? AND r.chart = ? AND r.date BETWEEN ? AND ?
+                GROUP BY r.appid
+                ORDER BY avg_rank ASC
+                """,
+                (platform, chart, start, end),
+            ).fetchall()
+            result_charts[chart] = []
+            for r in rows:
+                icon_u = media_cache.rewrite_icon_url(conn, r["icon_url"])
+                result_charts[chart].append(
+                    {
+                        "appid": r["appid"],
+                        "name": r["name"],
+                        "icon_url": icon_u,
+                        "developer": r["developer"],
+                        "genre_major": r["genre_major"],
+                        "tags": _parse_tags(r["tags"]),
+                        "avg_rank": r["avg_rank"],
+                        "appearances": r["appearances"],
+                    }
+                )
+
+    return {
+        "platform": platform,
+        "range": time_range,
+        "start_date": start,
+        "end_date": end,
+        "charts": result_charts,
+    }
+
+
+@app.get("/api/search")
+def api_search(
+    q: str,
+    platform: str = Query(..., pattern="^(wx|dy|yyb)$"),
+    date: str | None = None,
+    field: Literal["name", "developer"] = "name",
+):
+    qstrip = (q or "").strip()
+    if not qstrip:
+        return {"query": q, "field": field, "platform": platform, "results": []}
+
+    with db.get_conn() as conn:
+        query_date = date or _latest_date(conn, platform)
+        if not query_date:
+            return {
+                "query": qstrip,
+                "field": field,
+                "platform": platform,
+                "date": None,
+                "results": [],
+            }
+        like = f"%{qstrip}%"
+        col = "name" if field == "name" else "developer"
+        games = conn.execute(
+            f"SELECT appid, name, developer, icon_url, genre_major, tags "
+            f"FROM games WHERE platform = ? AND {col} LIKE ?",
+            (platform, like),
+        ).fetchall()
+
+        results = []
+        for g in games:
+            charts_row = conn.execute(
+                "SELECT chart, rank FROM rankings WHERE platform=? AND date=? AND appid=?",
+                (platform, query_date, g["appid"]),
+            ).fetchall()
+            charts = {r["chart"]: r["rank"] for r in charts_row}
+            results.append(
+                {
+                    "appid": g["appid"],
+                    "name": g["name"],
+                    "developer": g["developer"],
+                    "icon_url": media_cache.rewrite_icon_url(conn, g["icon_url"]),
+                    "genre_major": g["genre_major"],
+                    "tags": _parse_tags(g["tags"]),
+                    "charts": charts,
+                }
+            )
+
+    return {
+        "query": qstrip,
+        "field": field,
+        "platform": platform,
+        "date": query_date,
+        "results": results,
+    }
+
+
+@app.get("/api/genre/snapshot")
+def api_genre_snapshot(
+    date: str,
+    platform: str = Query(..., pattern="^(wx|dy|yyb)$"),
+    chart: str = Query(...),
+):
+    with db.get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT g.genre_major, COUNT(*) AS cnt, ROUND(AVG(r.rank), 1) AS avg_rank
+            FROM rankings r JOIN games g ON g.appid = r.appid
+            WHERE r.date=? AND r.platform=? AND r.chart=? AND g.genre_major IS NOT NULL
+            GROUP BY g.genre_major
+            ORDER BY cnt DESC
+            """,
+            (date, platform, chart),
+        ).fetchall()
+        genre_distribution = [
+            {"genre": r["genre_major"], "count": r["cnt"], "avg_rank": r["avg_rank"]}
+            for r in rows
+        ]
+
+        tag_rows = conn.execute(
+            "SELECT g.tags FROM rankings r JOIN games g ON g.appid=r.appid "
+            "WHERE r.date=? AND r.platform=? AND r.chart=?",
+            (date, platform, chart),
+        ).fetchall()
+        tag_counts: dict[str, int] = {}
+        for row in tag_rows:
+            for tag in _tags_split(row["tags"]):
+                tag_counts[tag] = tag_counts.get(tag, 0) + 1
+        tag_frequency = sorted(
+            [{"tag": k, "count": v} for k, v in tag_counts.items()],
+            key=lambda x: x["count"],
+            reverse=True,
+        )[:20]
+
+    return {
+        "date": date,
+        "platform": platform,
+        "chart": chart,
+        "genre_distribution": genre_distribution,
+        "tag_frequency": tag_frequency,
+    }
+
+
+@app.get("/api/genre/trend")
+def api_genre_trend(
+    platform: str = Query(..., pattern="^(wx|dy|yyb)$"),
+    chart: str = Query(...),
+    days: int = Query(30, ge=1, le=365),
+):
+    end = date_cls.today()
+    start = end - timedelta(days=days - 1)
+    start_s = start.isoformat()
+    end_s = end.isoformat()
+    with db.get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT r.date, g.genre_major, COUNT(*) AS cnt
+            FROM rankings r JOIN games g ON g.appid=r.appid
+            WHERE r.platform=? AND r.chart=? AND r.date BETWEEN ? AND ?
+              AND g.genre_major IS NOT NULL
+            GROUP BY r.date, g.genre_major
+            ORDER BY r.date ASC
+            """,
+            (platform, chart, start_s, end_s),
+        ).fetchall()
+
+    dates_set = sorted({r["date"] for r in rows})
+    genres_set = {r["genre_major"] for r in rows}
+    series: dict[str, list] = {g: [] for g in genres_set}
+    lookup = {(r["date"], r["genre_major"]): r["cnt"] for r in rows}
+    for d in dates_set:
+        for g in genres_set:
+            series[g].append(lookup.get((d, g), 0))
+
+    return {
+        "platform": platform,
+        "chart": chart,
+        "days": days,
+        "dates": dates_set,
+        "series": series,
     }
 
 

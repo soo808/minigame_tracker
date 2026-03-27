@@ -141,6 +141,25 @@ def collect_all_charts() -> None:
 
             _sleep_between_charts()
 
+    _post_collect_enrichment()
+
+
+def _post_collect_enrichment() -> None:
+    try:
+        from collector.yyb_detail import collect_detail_batch
+
+        logger.info("Post-collect: detail enrichment...")
+        collect_detail_batch(ai_fallback=True)
+    except Exception:
+        logger.exception("post-collect detail enrichment failed")
+    try:
+        from backend.analyzer.classify import classify_games_batch
+
+        logger.info("Post-collect: genre classification...")
+        classify_games_batch(force=False)
+    except Exception:
+        logger.exception("post-collect classify failed")
+
 
 def collect_yyb_charts(date: str, *, force: bool = False) -> None:
     """
@@ -294,6 +313,7 @@ def start_scheduler() -> BackgroundScheduler:
             backfill_wx_from_yyb(day)
         except Exception:
             logger.exception("wx YYB backfill failed date=%s", day)
+        _post_collect_enrichment()
         nxt = _tomorrow_random_yyb_collect()
         sched.add_job(
             yyb_collect_then_reschedule,

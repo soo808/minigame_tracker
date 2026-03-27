@@ -1,0 +1,1 @@
+import{_ as c,j as e,c as s}from"./index-2mJED6Wx.js";const t={},o={class:"placeholder"};function _(a,n){return e(),s("div",o,"大屏洞察看板（待实现）")}const d=c(t,[["render",_],["__scopeId","data-v-2163d96c"]]);export{d as default};
