@@ -12,12 +12,12 @@ from typing import Literal
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
 from backend import db
 from backend import media_cache
+from backend.spa_staticfiles import SpaStaticFiles
 from backend.analyzer import trends
 from backend.analyzer.classify import classify_games_batch
 from backend.ingest_service import apply_chart_payload, map_ingest_chart
@@ -698,6 +698,6 @@ def api_genre_trend(
 if FRONT_DIST.is_dir():
     app.mount(
         "/minigame-tracker",
-        StaticFiles(directory=str(FRONT_DIST), html=True),
+        SpaStaticFiles(directory=str(FRONT_DIST), html=True),
         name="static",
     )
