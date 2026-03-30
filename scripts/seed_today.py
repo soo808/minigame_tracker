@@ -1,4 +1,14 @@
-"""One-shot: fetch six charts and write DB (for local demo)."""
+"""One-shot: fetch six gravity charts (wx+dy) for Shanghai today and write the DB.
+
+Use when the rankings date dropdown is missing «today»: the UI only lists dates that
+already exist in ``rankings``. If the backend started after the 11:30 Shanghai cutoff
+or collection failed, run from repo root with ``.env`` configured (Gravity JWT, etc.):
+
+    python scripts/seed_today.py
+
+Alternatively POST ``/api/ingest`` with the same payloads. Does not replace the
+scheduled collector for tomorrow onward.
+"""
 from __future__ import annotations
 
 import random

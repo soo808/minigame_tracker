@@ -9,6 +9,7 @@ import RankingsSyncedGrid from "../components/RankingsSyncedGrid.vue";
 
 const platform = ref<"wx" | "dy" | "yyb">("wx");
 const dates = ref<string[]>([]);
+const datesLoaded = ref(false);
 const selectedDate = ref<string | null>(null);
 const payload = ref<{
   date: string | null;
@@ -277,8 +278,24 @@ function writePlatformToUrl() {
   window.history.replaceState({}, "", u.toString());
 }
 
+function shanghaiTodayStr(): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
+const todayMissingFromDates = computed(
+  () =>
+    datesLoaded.value &&
+    !dates.value.includes(shanghaiTodayStr()),
+);
+
 async function loadDates() {
   err.value = "";
+  datesLoaded.value = false;
   try {
     const u = new URL(apiUrl("dates"));
     u.searchParams.set("platform", platform.value);
@@ -290,6 +307,8 @@ async function loadDates() {
   } catch (e) {
     err.value = e instanceof Error ? e.message : String(e);
     dates.value = [];
+  } finally {
+    datesLoaded.value = true;
   }
 }
 
@@ -471,6 +490,13 @@ watch(availableCategories, (avail) => {
         </label>
 
         <span class="data-hint">数据每日约 11:00 更新</span>
+        <span
+          v-if="todayMissingFromDates"
+          class="data-hint data-hint--warn"
+          title="上海日历日尚未出现在当前平台的榜单日期中"
+        >
+          当日数据可能尚未入库（约 11:00 更新）或采集失败；可稍后刷新或由运维补采。
+        </span>
 
         <div class="date-bar-end">
           <button type="button" class="ghost ghost--compact" @click="goToday">
@@ -676,6 +702,11 @@ h1 {
 .data-hint {
   font-size: 12px;
   color: #94a3b8;
+}
+.data-hint--warn {
+  color: #b45309;
+  max-width: 28em;
+  line-height: 1.35;
 }
 .date-bar-end {
   margin-left: auto;

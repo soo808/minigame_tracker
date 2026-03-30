@@ -11,6 +11,7 @@ import httpx
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.date import DateTrigger
 
+from backend import db
 from collector import config
 from collector.gravity import fetch_chart, gravity_items_to_games
 from collector.yyb import fetch_yyb_chart
@@ -67,7 +68,7 @@ def _sleep_between_charts() -> None:
         time.sleep(random.uniform(2.0, 8.0))
 
 
-def collect_all_charts() -> None:
+def collect_all_charts(*, ignore_collection_deadline: bool = False) -> None:
     day = _today_str()
     order = CHART_JOBS[:]
     random.shuffle(order)
@@ -75,7 +76,10 @@ def collect_all_charts() -> None:
     with httpx.Client(follow_redirects=True) as client:
         for rank_genre, rank_type, platform, db_chart in order:
             now = datetime.now(TZ)
-            if now >= _deadline_today():
+            if (
+                not ignore_collection_deadline
+                and now >= _deadline_today()
+            ):
                 logger.error(
                     "collection deadline 11:30 reached; skipping %s %s (%s)",
                     platform,
@@ -211,6 +215,23 @@ def collect_yyb_charts(date: str, *, force: bool = False) -> None:
         time.sleep(random.uniform(3.0, 10.0))
 
 
+def _gravity_charts_complete_for_day(day: str) -> bool:
+    """True when every CHART_JOBS (wx/dy) chart has at least one rankings row for ``day``."""
+    try:
+        with db.get_conn() as conn:
+            for _rg, _rt, platform, chart in CHART_JOBS:
+                r = conn.execute(
+                    "SELECT 1 FROM rankings WHERE date=? AND platform=? AND chart=? LIMIT 1",
+                    (day, platform, chart),
+                ).fetchone()
+                if r is None:
+                    return False
+        return True
+    except Exception:
+        logger.exception("gravity completeness check failed for %s", day)
+        return True
+
+
 def _random_fire_in_window(target_day: date) -> datetime:
     ws, we = _window_bounds(target_day)
     delta_sec = random.randint(0, int((we - ws).total_seconds()))
@@ -224,30 +245,33 @@ def _random_yyb_fire_in_window(target_day: date) -> datetime:
     return ws + timedelta(seconds=delta_sec)
 
 
-def _first_scheduled_run() -> datetime:
+def _first_scheduled_run() -> tuple[datetime, bool]:
+    """(first run time, use catch-up job). Catch-up ignores 11:30 deadline for gravity fetch."""
     now = datetime.now(TZ)
     d = now.date()
     ws, we = _window_bounds(d)
     deadline = datetime.combine(d, dtime(11, 30), tzinfo=TZ)
 
     if now > deadline:
+        if not _gravity_charts_complete_for_day(_today_str()):
+            return now + timedelta(seconds=15), True
         tmr = d + timedelta(days=1)
-        return _random_fire_in_window(tmr)
+        return _random_fire_in_window(tmr), False
 
     if now < ws:
-        return _random_fire_in_window(d)
+        return _random_fire_in_window(d), False
 
     if now <= we:
         latest = max(ws, now)
         span = max(0, int((we - latest).total_seconds()))
         delta_sec = random.randint(0, span) if span > 0 else 0
-        return latest + timedelta(seconds=max(delta_sec, 3))
+        return latest + timedelta(seconds=max(delta_sec, 3)), False
 
     if now < deadline:
-        return now + timedelta(seconds=5)
+        return now + timedelta(seconds=5), False
 
     tmr = d + timedelta(days=1)
-    return _random_fire_in_window(tmr)
+    return _random_fire_in_window(tmr), False
 
 
 def _first_scheduled_yyb_run() -> datetime:
@@ -303,6 +327,20 @@ def start_scheduler() -> BackgroundScheduler:
         )
         logger.info("next gravity collection scheduled at %s", nxt)
 
+    def gravity_catchup_then_schedule_normal() -> None:
+        logger.info(
+            "gravity same-day catch-up (started after 11:30 Shanghai, incomplete rankings)"
+        )
+        collect_all_charts(ignore_collection_deadline=True)
+        nxt = _tomorrow_random_collect()
+        sched.add_job(
+            gravity_collect_then_reschedule,
+            DateTrigger(run_date=nxt),
+            id="daily_collect_gravity",
+            replace_existing=True,
+        )
+        logger.info("next gravity collection scheduled at %s", nxt)
+
     def yyb_collect_then_reschedule() -> None:
         day = _today_str()
         try:
@@ -323,10 +361,15 @@ def start_scheduler() -> BackgroundScheduler:
         )
         logger.info("next yyb collection scheduled at %s", nxt)
 
-    first_g = _first_scheduled_run()
+    first_g, gravity_catchup = _first_scheduled_run()
     first_y = _first_scheduled_yyb_run()
+    gravity_first_job = (
+        gravity_catchup_then_schedule_normal
+        if gravity_catchup
+        else gravity_collect_then_reschedule
+    )
     sched.add_job(
-        gravity_collect_then_reschedule,
+        gravity_first_job,
         DateTrigger(run_date=first_g),
         id="daily_collect_gravity",
         replace_existing=True,
@@ -340,8 +383,9 @@ def start_scheduler() -> BackgroundScheduler:
     sched.start()
     _scheduler = sched
     logger.info(
-        "scheduler started; first gravity at %s, first yyb at %s (Asia/Shanghai)",
+        "scheduler started; first gravity at %s (%s), first yyb at %s (Asia/Shanghai)",
         first_g,
+        "catch-up" if gravity_catchup else "normal",
         first_y,
     )
     return sched
