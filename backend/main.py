@@ -1,13 +1,16 @@
 """FastAPI app: REST API + optional static frontend."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
+import secrets
 from contextlib import asynccontextmanager
 from datetime import date as date_cls
 from datetime import timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,13 +23,28 @@ from backend import media_cache
 from backend.spa_staticfiles import SpaStaticFiles
 from backend.analyzer import trends
 from backend.analyzer.classify import classify_games_batch
+from backend.analyzer.insight_infer import (
+    TOP50_CHARTS_MAX_LIMIT,
+    run_insight_infer_batch,
+)
 from backend.ingest_service import apply_chart_payload, map_ingest_chart
-from backend.models import IngestBody
+from backend.models import (
+    GameplayAssignBody,
+    IngestBody,
+    InsightInferBatchBody,
+    InsightInferTop50Body,
+    MonetizationUpsertBody,
+    ViralityUpsertBody,
+)
 from collector.scheduler import collect_yyb_charts, shutdown_scheduler, start_scheduler
 from collector.yyb_detail import collect_detail_batch
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+_INSIGHT_TOP50_JOBS: dict[str, dict[str, Any]] = {}
+
+SAME_GENRE_PEER_LIMIT = 8
 
 ROOT = Path(__file__).resolve().parent.parent
 FRONT_DIST = ROOT / "frontend" / "dist"
@@ -64,6 +82,57 @@ def _charts_for_api(platform: str) -> list[tuple[str, str]]:
         ("changxiao", "bestseller"),
         ("xinyou", "fresh_game"),
     ]
+
+
+def _game_insight_ui_flags(
+    conn, appid: str, platform: str, d: str | None
+) -> dict[str, bool]:
+    """Top-50 union on snapshot date + whether to show per-game AI infer CTA."""
+    m = conn.execute(
+        "SELECT source FROM game_monetization WHERE appid = ?", (appid,)
+    ).fetchone()
+    manual_mon = m is not None and m["source"] == "manual"
+
+    mon_row = conn.execute(
+        "SELECT 1 FROM game_monetization WHERE appid = ?", (appid,)
+    ).fetchone()
+    gp = conn.execute(
+        "SELECT 1 FROM game_gameplay_tags WHERE appid = ? LIMIT 1", (appid,)
+    ).fetchone()
+    v = conn.execute(
+        "SELECT 1 FROM virality_assumptions WHERE appid = ? LIMIT 1", (appid,)
+    ).fetchone()
+    complete = mon_row is not None and gp is not None and v is not None
+
+    in_top50 = False
+    if d:
+        charts = [c for _, c in _charts_for_api(platform)]
+        ph = ",".join("?" * len(charts))
+        r = conn.execute(
+            f"""
+            SELECT 1 FROM rankings
+            WHERE date = ? AND platform = ? AND appid = ?
+              AND chart IN ({ph}) AND rank <= 50
+            LIMIT 1
+            """,
+            (d, platform, appid, *charts),
+        ).fetchone()
+        in_top50 = r is not None
+
+    if manual_mon:
+        show = False
+    elif not in_top50:
+        show = True
+    elif complete:
+        show = False
+    else:
+        show = True
+
+    return {
+        "in_snapshot_top50_union": in_top50,
+        "insight_surfaces_complete": complete,
+        "show_ai_insight_button": show,
+    }
 
 
 def _latest_date(conn, platform: str | None = None) -> str | None:
@@ -131,6 +200,14 @@ def api_dates(platform: str | None = None):
                 "SELECT DISTINCT date FROM rankings ORDER BY date DESC"
             ).fetchall()
     return {"dates": [r["date"] for r in rows]}
+
+
+@app.get("/api/config")
+def api_public_config():
+    """Public UI flags (no secrets). Colleague-facing deploy: SHOW_TOP50_BULK_BUTTON=0."""
+    raw = os.environ.get("SHOW_TOP50_BULK_BUTTON", "1").strip().lower()
+    show_bulk = raw not in ("0", "false", "no", "off")
+    return {"show_top50_bulk_button": show_bulk}
 
 
 @app.get("/api/media/{sha256_hex}")
@@ -229,18 +306,25 @@ def api_rankings(
         return {"date": d, "platform": platform, "charts": charts_out}
 
 
+def _include_set(raw: str | None) -> set[str]:
+    return {x.strip() for x in (raw or "").split(",") if x.strip()}
+
+
 @app.get("/api/game/{appid}")
 def api_game(
     appid: str,
     days: int = Query(30, ge=1, le=90),
     platform: str = Query("wx", pattern="^(wx|dy|yyb)$"),
+    date: str | None = Query(
+        None,
+        description="榜单日，用于同榜同类；默认取该平台 rankings 最新日期",
+    ),
+    include: str | None = Query(
+        None,
+        description="逗号分隔：gameplay,monetization,virality",
+    ),
 ):
-    with db.get_conn() as conn:
-        g = conn.execute("SELECT * FROM games WHERE appid = ?", (appid,)).fetchone()
-        if not g:
-            raise HTTPException(404, "game not found")
-        icon_public = media_cache.rewrite_icon_url(conn, g["icon_url"])
-    series = trends.all_charts_series_for_platform(appid, platform, days)
+    inc = _include_set(include)
     chart_labels = {
         "popularity": "人气榜",
         "most_played": "畅玩榜",
@@ -249,7 +333,98 @@ def api_game(
         "popular": "热门榜",
         "new_game": "新游榜",
     }
-    return {
+    with db.get_conn() as conn:
+        g = conn.execute("SELECT * FROM games WHERE appid = ?", (appid,)).fetchone()
+        if not g:
+            raise HTTPException(404, "game not found")
+        icon_public = media_cache.rewrite_icon_url(conn, g["icon_url"])
+        d = date or _latest_date(conn, platform)
+        genre_major = g["genre_major"]
+        same_genre_peers: dict[str, list[dict]] = {}
+        if d and genre_major:
+            for api_key, db_chart in _charts_for_api(platform):
+                rows = conn.execute(
+                    """
+                    SELECT r.appid, g2.name, g2.icon_url, r.rank
+                    FROM rankings r
+                    JOIN games g2 ON g2.appid = r.appid
+                    WHERE r.date = ? AND r.platform = ? AND r.chart = ?
+                      AND r.appid != ?
+                      AND g2.genre_major IS NOT NULL AND g2.genre_major = ?
+                    ORDER BY r.rank ASC
+                    LIMIT ?
+                    """,
+                    (
+                        d,
+                        platform,
+                        db_chart,
+                        appid,
+                        genre_major,
+                        SAME_GENRE_PEER_LIMIT,
+                    ),
+                ).fetchall()
+                same_genre_peers[api_key] = [
+                    {
+                        "appid": r["appid"],
+                        "name": r["name"],
+                        "icon_url": media_cache.rewrite_icon_url(
+                            conn, r["icon_url"]
+                        ),
+                        "rank": int(r["rank"]),
+                        "chart": db_chart,
+                    }
+                    for r in rows
+                ]
+        elif d:
+            same_genre_peers = {
+                api_key: [] for api_key, _ in _charts_for_api(platform)
+            }
+        else:
+            same_genre_peers = {
+                api_key: [] for api_key, _ in _charts_for_api(platform)
+            }
+
+        gameplay_payload = None
+        if "gameplay" in inc:
+            rows = conn.execute(
+                """
+                SELECT gt.id AS tag_id, gt.slug, gt.name, ggt.role, ggt.evidence,
+                       ggt.source, ggt.updated_by, ggt.updated_at
+                FROM game_gameplay_tags ggt
+                JOIN gameplay_tags gt ON gt.id = ggt.tag_id
+                WHERE ggt.appid = ?
+                ORDER BY gt.name
+                """,
+                (appid,),
+            ).fetchall()
+            gameplay_payload = [dict(r) for r in rows]
+
+        monetization_payload = None
+        if "monetization" in inc:
+            m = conn.execute(
+                "SELECT * FROM game_monetization WHERE appid = ?",
+                (appid,),
+            ).fetchone()
+            monetization_payload = dict(m) if m else None
+
+        virality_payload = None
+        if "virality" in inc:
+            rows = conn.execute(
+                """
+                SELECT id, channels, hypothesis, evidence, confidence,
+                       source, updated_by, updated_at
+                FROM virality_assumptions
+                WHERE appid = ?
+                ORDER BY updated_at DESC
+                """,
+                (appid,),
+            ).fetchall()
+            virality_payload = [dict(r) for r in rows]
+
+        insight_ui = _game_insight_ui_flags(conn, appid, platform, d)
+
+    series = trends.all_charts_series_for_platform(appid, platform, days)
+    out: dict = {
         "appid": appid,
         "platform": g["platform"],
         "name": g["name"],
@@ -259,11 +434,214 @@ def api_game(
         "tags": _parse_tags(g["tags"]),
         "genre_major": g["genre_major"],
         "genre_minor": g["genre_minor"],
+        "snapshot_date": d,
+        "same_genre_peers": same_genre_peers,
         "charts": {
             k: {"label": chart_labels.get(k, k), "series": v}
             for k, v in series.items()
         },
+        **insight_ui,
     }
+    if "gameplay" in inc:
+        out["gameplay_tags"] = gameplay_payload
+    if "monetization" in inc:
+        out["monetization"] = monetization_payload
+    if "virality" in inc:
+        out["virality_assumptions"] = virality_payload
+    return out
+
+
+@app.get("/api/gameplay/tags")
+def api_gameplay_tags_list():
+    with db.get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, slug, name, parent_id, description, created_at "
+            "FROM gameplay_tags ORDER BY name"
+        ).fetchall()
+    return {"tags": [dict(r) for r in rows]}
+
+
+@app.post("/api/gameplay/assign")
+def api_gameplay_assign(body: GameplayAssignBody):
+    with db.get_conn() as conn:
+        g = conn.execute(
+            "SELECT 1 FROM games WHERE appid = ?", (body.appid,)
+        ).fetchone()
+        if not g:
+            raise HTTPException(404, "game not found")
+        t = conn.execute(
+            "SELECT 1 FROM gameplay_tags WHERE id = ?", (body.tag_id,)
+        ).fetchone()
+        if not t:
+            raise HTTPException(400, "unknown tag_id")
+        conn.execute(
+            """
+            INSERT INTO game_gameplay_tags
+              (appid, tag_id, role, source, updated_by, updated_at)
+            VALUES (?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(appid, tag_id) DO UPDATE SET
+              role = excluded.role,
+              source = excluded.source,
+              updated_by = excluded.updated_by,
+              updated_at = datetime('now')
+            """,
+            (
+                body.appid,
+                body.tag_id,
+                body.role,
+                body.source,
+                body.updated_by,
+            ),
+        )
+    return {"ok": True}
+
+
+@app.post("/api/monetization/upsert")
+def api_monetization_upsert(body: MonetizationUpsertBody):
+    with db.get_conn() as conn:
+        g = conn.execute(
+            "SELECT 1 FROM games WHERE appid = ?", (body.appid,)
+        ).fetchone()
+        if not g:
+            raise HTTPException(404, "game not found")
+        conn.execute(
+            """
+            INSERT INTO game_monetization
+              (appid, monetization_model, mix_note, confidence,
+               evidence_summary, ad_placement_notes, source, updated_by, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(appid) DO UPDATE SET
+              monetization_model = excluded.monetization_model,
+              mix_note = excluded.mix_note,
+              confidence = excluded.confidence,
+              evidence_summary = excluded.evidence_summary,
+              ad_placement_notes = excluded.ad_placement_notes,
+              source = excluded.source,
+              updated_by = excluded.updated_by,
+              updated_at = datetime('now')
+            """,
+            (
+                body.appid,
+                body.monetization_model,
+                body.mix_note,
+                body.confidence,
+                body.evidence_summary,
+                body.ad_placement_notes,
+                body.source,
+                body.updated_by,
+            ),
+        )
+    return {"ok": True}
+
+
+async def _insight_infer_async(body: InsightInferBatchBody) -> dict:
+    return await asyncio.to_thread(
+        run_insight_infer_batch,
+        limit=body.limit,
+        batch_size=body.batch_size,
+        only_missing=body.only_missing,
+        force=body.force,
+        platform=body.platform,
+        ranking_date=body.ranking_date,
+        appid=body.appid,
+        top50_charts=body.top50_charts,
+        insight_gap_only=body.insight_gap_only,
+    )
+
+
+async def _run_insight_top50_job(job_id: str, body: InsightInferTop50Body) -> None:
+    entry = _INSIGHT_TOP50_JOBS.get(job_id)
+    if entry is None:
+        return
+    entry["status"] = "running"
+    try:
+        result = await asyncio.to_thread(
+            run_insight_infer_batch,
+            limit=TOP50_CHARTS_MAX_LIMIT,
+            batch_size=body.batch_size,
+            only_missing=True,
+            force=body.force,
+            platform=body.platform,
+            ranking_date=body.ranking_date,
+            appid=None,
+            top50_charts=True,
+            insight_gap_only=body.insight_gap_only,
+        )
+        _INSIGHT_TOP50_JOBS[job_id] = {"status": "done", "job_id": job_id, **result}
+    except Exception as exc:
+        logger.exception("infer-top50 job %s failed", job_id)
+        _INSIGHT_TOP50_JOBS[job_id] = {
+            "status": "error",
+            "job_id": job_id,
+            "errors": [str(exc)],
+        }
+
+
+@app.post("/api/insight/infer-batch")
+async def api_insight_infer_batch(body: InsightInferBatchBody):
+    """批量 LLM 推断：变现 + 玩法标签 + 传播假设（不覆盖 source=manual 的变现）。"""
+    result = await _insight_infer_async(body)
+    return {"ok": True, **result}
+
+
+@app.post("/api/insight/infer-top50")
+async def api_insight_infer_top50(body: InsightInferTop50Body):
+    """异步任务：三榜各前50并集洞察（轮询 GET /api/insight/infer-job/{job_id}）。"""
+    job_id = secrets.token_hex(8)
+    _INSIGHT_TOP50_JOBS[job_id] = {"status": "pending", "job_id": job_id}
+    asyncio.create_task(_run_insight_top50_job(job_id, body))
+    return {"ok": True, "job_id": job_id}
+
+
+@app.get("/api/insight/infer-job/{job_id}")
+def api_insight_infer_job(job_id: str):
+    row = _INSIGHT_TOP50_JOBS.get(job_id)
+    if not row:
+        raise HTTPException(404, "unknown job_id")
+    return row
+
+
+@app.post("/api/monetization/run")
+async def api_monetization_run(body: InsightInferBatchBody = InsightInferBatchBody()):
+    """与 infer-batch 相同逻辑；便于旧客户端调用。"""
+    result = await _insight_infer_async(body)
+    return {"ok": True, **result}
+
+
+@app.post("/api/virality/upsert")
+def api_virality_upsert(body: ViralityUpsertBody):
+    with db.get_conn() as conn:
+        g = conn.execute(
+            "SELECT 1 FROM games WHERE appid = ?", (body.appid,)
+        ).fetchone()
+        if not g:
+            raise HTTPException(404, "game not found")
+        cur = conn.execute(
+            """
+            INSERT INTO virality_assumptions
+              (appid, channels, hypothesis, evidence, confidence,
+               source, updated_by, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            """,
+            (
+                body.appid,
+                body.channels,
+                body.hypothesis,
+                body.evidence,
+                body.confidence,
+                body.source,
+                body.updated_by,
+            ),
+        )
+        new_id = cur.lastrowid
+    return {"ok": True, "id": new_id}
+
+
+@app.post("/api/virality/generate")
+async def api_virality_generate(body: InsightInferBatchBody = InsightInferBatchBody()):
+    """与 infer-batch 相同逻辑；传播块与变现、玩法同一批推断。"""
+    result = await _insight_infer_async(body)
+    return {"ok": True, **result}
 
 
 @app.get("/api/game/{appid}/sparkline")

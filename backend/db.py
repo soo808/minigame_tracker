@@ -129,3 +129,54 @@ def init_db() -> None:
                 conn.execute(f"ALTER TABLE games ADD COLUMN {col} {typedef}")
             except sqlite3.OperationalError:
                 pass
+
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS gameplay_tags (
+              id            INTEGER PRIMARY KEY AUTOINCREMENT,
+              slug          TEXT NOT NULL UNIQUE,
+              name          TEXT NOT NULL,
+              parent_id     INTEGER REFERENCES gameplay_tags(id),
+              description   TEXT,
+              created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS game_gameplay_tags (
+              appid         TEXT NOT NULL REFERENCES games(appid) ON DELETE CASCADE,
+              tag_id        INTEGER NOT NULL REFERENCES gameplay_tags(id) ON DELETE CASCADE,
+              role          TEXT,
+              evidence      TEXT,
+              source        TEXT NOT NULL DEFAULT 'manual',
+              updated_by    TEXT,
+              updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+              PRIMARY KEY (appid, tag_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS game_monetization (
+              appid                 TEXT PRIMARY KEY REFERENCES games(appid) ON DELETE CASCADE,
+              monetization_model    TEXT NOT NULL DEFAULT 'unknown',
+              mix_note              TEXT,
+              confidence            REAL,
+              evidence_summary      TEXT,
+              ad_placement_notes    TEXT,
+              source                TEXT NOT NULL DEFAULT 'manual',
+              updated_by            TEXT,
+              updated_at            TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS virality_assumptions (
+              id            INTEGER PRIMARY KEY AUTOINCREMENT,
+              appid         TEXT NOT NULL REFERENCES games(appid) ON DELETE CASCADE,
+              channels      TEXT,
+              hypothesis    TEXT NOT NULL,
+              evidence      TEXT,
+              confidence    REAL,
+              source        TEXT NOT NULL DEFAULT 'manual',
+              updated_by    TEXT,
+              updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_ggt_appid ON game_gameplay_tags(appid);
+            CREATE INDEX IF NOT EXISTS idx_virality_appid ON virality_assumptions(appid);
+            """
+        )

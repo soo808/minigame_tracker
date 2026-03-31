@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
+import threading
 import time
 from datetime import date, datetime, timedelta, time as dtime
 from zoneinfo import ZoneInfo
@@ -165,6 +167,86 @@ def _post_collect_enrichment() -> None:
         logger.exception("post-collect classify failed")
 
 
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _run_auto_top50_wx_dy_background() -> None:
+    """After gravity collect: optional LLM top-50 for wx and dy (daemon thread)."""
+    if not _env_truthy("AUTO_TOP50_INSIGHT_AFTER_COLLECT"):
+        return
+
+    def worker() -> None:
+        from backend.analyzer.insight_infer import (
+            TOP50_CHARTS_MAX_LIMIT,
+            run_insight_infer_batch,
+        )
+
+        logger.info("AUTO_TOP50_INSIGHT_AFTER_COLLECT: wx/dy background run starting")
+        try:
+            for plat in ("wx", "dy"):
+                out = run_insight_infer_batch(
+                    limit=TOP50_CHARTS_MAX_LIMIT,
+                    batch_size=12,
+                    only_missing=True,
+                    force=False,
+                    platform=plat,
+                    ranking_date=None,
+                    top50_charts=True,
+                    insight_gap_only=True,
+                )
+                logger.info(
+                    "auto top50 insight done platform=%s candidates=%s batches=%s err=%s",
+                    plat,
+                    out.get("candidates"),
+                    out.get("batches"),
+                    bool(out.get("errors")),
+                )
+        except Exception:
+            logger.exception("auto top50 insight wx/dy failed")
+
+    threading.Thread(
+        target=worker, daemon=True, name="auto-top50-wx-dy"
+    ).start()
+
+
+def _run_auto_top50_yyb_background() -> None:
+    """After YYB collect: optional LLM top-50 for yyb (daemon thread)."""
+    if not _env_truthy("AUTO_TOP50_INSIGHT_AFTER_COLLECT"):
+        return
+
+    def worker() -> None:
+        from backend.analyzer.insight_infer import (
+            TOP50_CHARTS_MAX_LIMIT,
+            run_insight_infer_batch,
+        )
+
+        logger.info("AUTO_TOP50_INSIGHT_AFTER_COLLECT: yyb background run starting")
+        try:
+            out = run_insight_infer_batch(
+                limit=TOP50_CHARTS_MAX_LIMIT,
+                batch_size=12,
+                only_missing=True,
+                force=False,
+                platform="yyb",
+                ranking_date=None,
+                top50_charts=True,
+                insight_gap_only=True,
+            )
+            logger.info(
+                "auto top50 insight done platform=yyb candidates=%s batches=%s err=%s",
+                out.get("candidates"),
+                out.get("batches"),
+                bool(out.get("errors")),
+            )
+        except Exception:
+            logger.exception("auto top50 insight yyb failed")
+
+    threading.Thread(
+        target=worker, daemon=True, name="auto-top50-yyb"
+    ).start()
+
+
 def collect_yyb_charts(date: str, *, force: bool = False) -> None:
     """
     YYB 三榜；榜间 3~10s。
@@ -318,6 +400,7 @@ def start_scheduler() -> BackgroundScheduler:
 
     def gravity_collect_then_reschedule() -> None:
         collect_all_charts()
+        _run_auto_top50_wx_dy_background()
         nxt = _tomorrow_random_collect()
         sched.add_job(
             gravity_collect_then_reschedule,
@@ -332,6 +415,7 @@ def start_scheduler() -> BackgroundScheduler:
             "gravity same-day catch-up (started after 11:30 Shanghai, incomplete rankings)"
         )
         collect_all_charts(ignore_collection_deadline=True)
+        _run_auto_top50_wx_dy_background()
         nxt = _tomorrow_random_collect()
         sched.add_job(
             gravity_collect_then_reschedule,
@@ -352,6 +436,7 @@ def start_scheduler() -> BackgroundScheduler:
         except Exception:
             logger.exception("wx YYB backfill failed date=%s", day)
         _post_collect_enrichment()
+        _run_auto_top50_yyb_background()
         nxt = _tomorrow_random_yyb_collect()
         sched.add_job(
             yyb_collect_then_reschedule,

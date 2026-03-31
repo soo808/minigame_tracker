@@ -1,15 +1,58 @@
 <script setup lang="ts">
 import * as echarts from "echarts";
-import { onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { apiUrl } from "../config";
 import { resolveIconSrc } from "../iconSrc";
+
+type PeerRow = {
+  appid: string;
+  name: string;
+  icon_url: string | null;
+  rank: number;
+  chart: string;
+};
+
+type GameplayRow = {
+  tag_id: number;
+  slug: string;
+  name: string;
+  role: string | null;
+  evidence: string | null;
+  source: string;
+};
+
+type MonetizationRow = {
+  monetization_model: string;
+  mix_note: string | null;
+  confidence: number | null;
+  evidence_summary: string | null;
+  ad_placement_notes: string | null;
+  source?: string;
+};
+
+type ViralityRow = {
+  id: number;
+  channels: string | null;
+  hypothesis: string;
+  evidence: string | null;
+  confidence: number | null;
+  source: string;
+};
 
 const props = defineProps<{
   appid: string | null;
   platform: "wx" | "dy" | "yyb";
+  /** 榜单参考日（日榜单日 / 周月榜区间结束日），用于同榜同类 */
+  asOfDate?: string | null;
 }>();
 
-const emit = defineEmits<{ close: [] }>();
+const emit = defineEmits<{ close: []; pick: [appid: string] }>();
+
+const PEER_CHART_LABELS: Record<"wx" | "dy" | "yyb", Record<string, string>> = {
+  wx: { renqi: "人气榜", changxiao: "畅销榜", changwan: "畅玩榜" },
+  dy: { renqi: "热门榜", changxiao: "畅销榜", xinyou: "新游榜" },
+  yyb: { popular: "热门榜", bestseller: "畅销榜", new_game: "新游榜" },
+};
 
 const root = ref<HTMLDivElement | null>(null);
 const chartEl = ref<HTMLDivElement | null>(null);
@@ -22,13 +65,38 @@ const tags = ref<string[]>([]);
 const description = ref("");
 const genreMajor = ref("");
 const genreMinor = ref("");
-const chartPayload = ref<Record<string, { label: string; series: { date: string; rank: number }[] }>>({});
+const snapshotDate = ref<string | null>(null);
+const chartPayload = ref<
+  Record<string, { label: string; series: { date: string; rank: number }[] }>
+>({});
+const sameGenrePeers = ref<Record<string, PeerRow[]>>({});
+const gameplayTags = ref<GameplayRow[]>([]);
+const monetization = ref<MonetizationRow | null>(null);
+const viralityAssumptions = ref<ViralityRow[]>([]);
+
+const insightLoading = ref(false);
+const insightNote = ref("");
+/** 前 50 并集且三类洞察已齐时后端为 false，50 名外为 true */
+const showAiInsightInfer = ref(true);
+
+const insightBlocked = computed(
+  () => monetization.value?.source === "manual",
+);
+
+const peerSectionKeys = computed(() => Object.keys(PEER_CHART_LABELS[props.platform]));
+
+function peerLabel(key: string): string {
+  return PEER_CHART_LABELS[props.platform][key] || key;
+}
 
 async function load() {
   if (!props.appid) return;
+  showAiInsightInfer.value = true;
   const u = new URL(apiUrl(`game/${props.appid}`));
   u.searchParams.set("platform", props.platform);
   u.searchParams.set("days", "30");
+  u.searchParams.set("include", "gameplay,monetization,virality");
+  if (props.asOfDate) u.searchParams.set("date", props.asOfDate);
   const res = await fetch(u.href);
   if (!res.ok) return;
   const data = await res.json();
@@ -39,8 +107,63 @@ async function load() {
   description.value = data.description || "";
   genreMajor.value = data.genre_major || "";
   genreMinor.value = data.genre_minor || "";
+  snapshotDate.value = data.snapshot_date ?? null;
   chartPayload.value = data.charts || {};
+  sameGenrePeers.value = data.same_genre_peers || {};
+  gameplayTags.value = Array.isArray(data.gameplay_tags) ? data.gameplay_tags : [];
+  monetization.value = data.monetization ?? null;
+  viralityAssumptions.value = Array.isArray(data.virality_assumptions)
+    ? data.virality_assumptions
+    : [];
+  showAiInsightInfer.value =
+    typeof data.show_ai_insight_button === "boolean"
+      ? data.show_ai_insight_button
+      : true;
   renderChart();
+}
+
+async function runInsightInfer() {
+  if (!props.appid) return;
+  insightNote.value = "";
+  insightLoading.value = true;
+  try {
+    const res = await fetch(apiUrl("insight/infer-batch"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        appid: props.appid,
+        platform: props.platform,
+        limit: 1,
+        batch_size: 1,
+        only_missing: false,
+        force: true,
+      }),
+    });
+    let data: Record<string, unknown> = {};
+    try {
+      data = (await res.json()) as Record<string, unknown>;
+    } catch {
+      /* ignore */
+    }
+    if (!res.ok) {
+      const detail = data.detail;
+      insightNote.value =
+        typeof detail === "string" ? detail : `请求失败 HTTP ${res.status}`;
+      return;
+    }
+    const errs = data.errors as string[] | undefined;
+    if (errs?.length) {
+      insightNote.value = errs.join(" ");
+      return;
+    }
+    insightNote.value =
+      `已更新：变现 ${String(data.monetization_updated ?? 0)}，玩法关联 ${String(data.gameplay_links_added ?? 0)}，传播 ${String(data.virality_inserted ?? 0)}`;
+    await load();
+  } catch (e) {
+    insightNote.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    insightLoading.value = false;
+  }
 }
 
 function renderChart() {
@@ -97,10 +220,27 @@ function onOverlayClick(e: MouseEvent) {
   if (e.target === root.value) emit("close");
 }
 
+function onPickPeer(peerAppid: string) {
+  emit("pick", peerAppid);
+}
+
+function monetizationLabel(m: string): string {
+  const map: Record<string, string> = {
+    iaa: "IAA",
+    iap: "IAP",
+    hybrid: "混变",
+    unknown: "未标注",
+  };
+  return map[m] || m;
+}
+
 onMounted(load);
 watch(
-  () => [props.appid, props.platform],
-  () => load(),
+  () => [props.appid, props.platform, props.asOfDate],
+  () => {
+    insightNote.value = "";
+    load();
+  },
 );
 
 onBeforeUnmount(() => {
@@ -121,6 +261,7 @@ onBeforeUnmount(() => {
         <div>
           <h2>{{ title }}</h2>
           <p v-if="developer" class="dev">{{ developer }}</p>
+          <p v-if="snapshotDate" class="snap-date">参考榜单日：{{ snapshotDate }}</p>
           <div v-if="tags.length" class="tags">
             <span v-for="(t, i) in tags" :key="i" class="tag">{{ t }}</span>
           </div>
@@ -131,6 +272,98 @@ onBeforeUnmount(() => {
           <p v-if="description" class="desc">{{ description }}</p>
         </div>
       </div>
+
+      <div
+        v-if="insightBlocked || showAiInsightInfer || insightLoading || insightNote"
+        class="insight-actions"
+      >
+        <button
+          v-if="insightBlocked || showAiInsightInfer"
+          type="button"
+          class="btn-insight"
+          :disabled="insightBlocked || insightLoading"
+          :title="
+            insightBlocked
+              ? '人工标注变现的游戏不进行 AI 推断'
+              : '为本游戏推断玩法、变现与传播（需配置 DeepSeek/OpenAI）'
+          "
+          @click="runInsightInfer"
+        >
+          {{ insightLoading ? "推断中…" : "AI 补全本游戏洞察" }}
+        </button>
+        <p v-if="insightNote" class="insight-note">{{ insightNote }}</p>
+      </div>
+
+      <section class="insight-block">
+        <p class="section-title">玩法标签</p>
+        <div v-if="gameplayTags.length" class="chip-row">
+          <span v-for="gt in gameplayTags" :key="gt.tag_id" class="insight-chip">
+            {{ gt.name }}
+            <span v-if="gt.role" class="chip-role">（{{ gt.role }}）</span>
+          </span>
+        </div>
+        <p v-else class="muted">暂无玩法标签数据。</p>
+      </section>
+
+      <section class="insight-block">
+        <p class="section-title">变现</p>
+        <template v-if="monetization">
+          <p class="mono-line">
+            <strong>{{ monetizationLabel(monetization.monetization_model) }}</strong>
+            <span v-if="monetization.mix_note" class="mix"> — {{ monetization.mix_note }}</span>
+          </p>
+          <p v-if="monetization.evidence_summary" class="evidence">
+            {{ monetization.evidence_summary }}
+          </p>
+        </template>
+        <p v-else class="muted">暂无变现方式说明。</p>
+      </section>
+
+      <section class="insight-block">
+        <p class="section-title">裂变与传播（假设）</p>
+        <ul v-if="viralityAssumptions.length" class="virality-list">
+          <li v-for="v in viralityAssumptions" :key="v.id">
+            <span class="vh">{{ v.hypothesis }}</span>
+            <span v-if="v.channels" class="vc">{{ v.channels }}</span>
+          </li>
+        </ul>
+        <p v-else class="muted">暂无传播假设记录。</p>
+      </section>
+
+      <section class="insight-block">
+        <p class="section-title">同榜同类（{{ snapshotDate || "—" }}）</p>
+        <p v-if="!genreMajor" class="muted">当前游戏未标注大类，无法匹配同榜同类。</p>
+        <template v-else>
+          <div
+            v-for="key in peerSectionKeys"
+            :key="key"
+            class="peer-row"
+          >
+            <span class="peer-lab">{{ peerLabel(key) }}</span>
+            <div v-if="(sameGenrePeers[key] || []).length" class="peer-icons">
+              <button
+                v-for="p in sameGenrePeers[key] || []"
+                :key="p.appid"
+                type="button"
+                class="peer-btn"
+                :title="`${p.name} #${p.rank}`"
+                @click="onPickPeer(p.appid)"
+              >
+                <img
+                  v-if="p.icon_url"
+                  class="peer-img"
+                  :src="resolveIconSrc(p.icon_url)"
+                  alt=""
+                />
+                <span v-else class="peer-ph" />
+                <span class="peer-rank">#{{ p.rank }}</span>
+              </button>
+            </div>
+            <span v-else class="muted inline">无其他同类在榜</span>
+          </div>
+        </template>
+      </section>
+
       <p class="section-title">近 30 日排名走势</p>
       <div ref="chartEl" class="chart" />
     </div>
@@ -201,6 +434,11 @@ h2 {
   font-size: 13px;
   color: #64748b;
 }
+.snap-date {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #94a3b8;
+}
 .tags {
   margin-top: 8px;
   display: flex;
@@ -226,10 +464,154 @@ h2 {
   color: #334155;
   line-height: 1.5;
 }
-.section-title {
-  margin: 20px 0 8px;
+.insight-actions {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+.btn-insight {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid #2563eb;
+  background: rgba(37, 99, 235, 0.08);
+  color: #1d4ed8;
   font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.btn-insight:hover:not(:disabled) {
+  background: rgba(37, 99, 235, 0.14);
+}
+.btn-insight:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.insight-note {
+  margin: 0;
+  font-size: 12px;
+  color: #0f766e;
+  line-height: 1.45;
+  max-width: 42rem;
+}
+.insight-block {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid #f1f5f9;
+}
+.section-title {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
   color: #64748b;
+}
+.muted {
+  margin: 0;
+  font-size: 12px;
+  color: #94a3b8;
+  line-height: 1.45;
+}
+.muted.inline {
+  display: inline;
+}
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.insight-chip {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  border: 1px solid #bfdbfe;
+}
+.chip-role {
+  font-weight: 400;
+  color: #64748b;
+}
+.mono-line {
+  margin: 0;
+  font-size: 13px;
+  color: #334155;
+}
+.mix {
+  font-weight: 400;
+  color: #64748b;
+}
+.evidence {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: #64748b;
+  line-height: 1.4;
+}
+.virality-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+  color: #334155;
+}
+.virality-list li {
+  margin-bottom: 6px;
+}
+.vh {
+  display: block;
+}
+.vc {
+  display: block;
+  font-size: 11px;
+  color: #94a3b8;
+  margin-top: 2px;
+}
+.peer-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.peer-lab {
+  flex: 0 0 72px;
+  font-size: 12px;
+  color: #64748b;
+  font-weight: 600;
+}
+.peer-icons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: 1;
+}
+.peer-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  border-radius: 8px;
+}
+.peer-btn:hover {
+  background: #f8fafc;
+}
+.peer-img,
+.peer-ph {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  object-fit: cover;
+  border: 1px solid #e2e8f0;
+}
+.peer-ph {
+  background: #f1f5f9;
+}
+.peer-rank {
+  font-size: 10px;
+  color: #94a3b8;
 }
 .chart {
   width: 100%;

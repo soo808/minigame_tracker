@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { apiUrl } from "../config";
 import type { GameEntry } from "../components/GameCard.vue";
 import GameModal from "../components/GameModal.vue";
@@ -293,6 +293,117 @@ const todayMissingFromDates = computed(
     !dates.value.includes(shanghaiTodayStr()),
 );
 
+const platformInsightLabels: Record<"wx" | "dy" | "yyb", string> = {
+  wx: "微信小游戏",
+  dy: "抖音小游戏",
+  yyb: "腾讯应用宝",
+};
+
+/** 由 GET /api/config 控制；同事看板可设 SHOW_TOP50_BULK_BUTTON=0 隐藏一键前50区 */
+const showTop50BulkButton = ref(true);
+
+async function loadPublicConfig(): Promise<void> {
+  try {
+    const res = await fetch(apiUrl("config"));
+    if (!res.ok) return;
+    const d = (await res.json()) as { show_top50_bulk_button?: boolean };
+    if (typeof d.show_top50_bulk_button === "boolean") {
+      showTop50BulkButton.value = d.show_top50_bulk_button;
+    }
+  } catch {
+    /* 保持默认 true */
+  }
+}
+
+const top50InsightPhase = ref<"idle" | "running" | "done" | "error">("idle");
+const top50InsightDetail = ref("");
+let top50PollTimer: ReturnType<typeof setInterval> | null = null;
+
+async function pollTop50Job(jobId: string) {
+  const jr = await fetch(apiUrl(`insight/infer-job/${jobId}`));
+  const j = (await jr.json()) as Record<string, unknown>;
+  if (!jr.ok) {
+    top50InsightPhase.value = "error";
+    top50InsightDetail.value =
+      typeof j.detail === "string" ? j.detail : `查询任务失败 HTTP ${jr.status}`;
+    return true;
+  }
+  const st = j.status as string;
+  if (st === "pending" || st === "running") return false;
+  if (st === "done") {
+    top50InsightPhase.value = "done";
+    const errs = j.errors as string[] | undefined;
+    top50InsightDetail.value = `已完成：候选 ${String(j.candidates ?? 0)}，批次数 ${String(j.batches ?? 0)}，变现 ${String(j.monetization_updated ?? 0)}，玩法关联 ${String(j.gameplay_links_added ?? 0)}，传播 ${String(j.virality_inserted ?? 0)}`;
+    if (errs?.length) top50InsightDetail.value += `（${errs.join("；")}）`;
+    return true;
+  }
+  top50InsightPhase.value = "error";
+  const errList = j.errors as string[] | undefined;
+  top50InsightDetail.value = errList?.length ? errList.join("；") : "任务失败";
+  return true;
+}
+
+async function startTop50Insight() {
+  if (dateRange.value !== "day" || !selectedDate.value) return;
+  if (top50PollTimer) {
+    clearInterval(top50PollTimer);
+    top50PollTimer = null;
+  }
+  top50InsightPhase.value = "running";
+  top50InsightDetail.value = "";
+  try {
+    const res = await fetch(apiUrl("insight/infer-top50"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        platform: platform.value,
+        ranking_date: selectedDate.value,
+        batch_size: 12,
+        insight_gap_only: true,
+        force: false,
+      }),
+    });
+    let data: Record<string, unknown> = {};
+    try {
+      data = (await res.json()) as Record<string, unknown>;
+    } catch {
+      /* ignore */
+    }
+    if (!res.ok || typeof data.job_id !== "string") {
+      top50InsightPhase.value = "error";
+      top50InsightDetail.value =
+        typeof data.detail === "string"
+          ? data.detail
+          : `启动失败 HTTP ${res.status}`;
+      return;
+    }
+    const jobId = data.job_id;
+    const tick = async () => {
+      const finished = await pollTop50Job(jobId);
+      if (finished && top50PollTimer) {
+        clearInterval(top50PollTimer);
+        top50PollTimer = null;
+      }
+    };
+    await tick();
+    if (top50InsightPhase.value === "running") {
+      top50PollTimer = setInterval(() => {
+        void tick();
+      }, 2000);
+    }
+  } catch (e) {
+    top50InsightPhase.value = "error";
+    top50InsightDetail.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
+onBeforeUnmount(() => {
+  if (top50PollTimer) {
+    clearInterval(top50PollTimer);
+    top50PollTimer = null;
+  }
+});
+
 async function loadDates() {
   err.value = "";
   datesLoaded.value = false;
@@ -375,6 +486,7 @@ function goToday() {
 
 onMounted(async () => {
   readPlatformFromUrl();
+  await loadPublicConfig();
   await loadDates();
   await loadRankings();
 });
@@ -540,6 +652,32 @@ watch(availableCategories, (avail) => {
         </div>
       </div>
 
+      <div
+        v-if="dateRange === 'day' && showTop50BulkButton"
+        class="top50-insight-row"
+      >
+        <button
+          type="button"
+          class="btn-top50-insight"
+          :disabled="
+            top50InsightPhase === 'running' || !selectedDate || loading
+          "
+          @click="startTop50Insight"
+        >
+          AI 补全{{ platformInsightLabels[platform] }}前三榜各前 50 名洞察
+        </button>
+        <p v-if="top50InsightPhase === 'running'" class="top50-insight-msg top50-insight-msg--run">
+          正在 AI 补全当前平台三榜前 50 名游戏的洞察（后台任务，请稍候）…
+        </p>
+        <p
+          v-else-if="top50InsightPhase === 'done' || top50InsightPhase === 'error'"
+          class="top50-insight-msg"
+          :class="{ 'top50-insight-msg--err': top50InsightPhase === 'error' }"
+        >
+          {{ top50InsightDetail }}
+        </p>
+      </div>
+
       <div class="date-row">
         <span v-if="loading" class="muted">加载中…</span>
         <span v-if="err" class="err">{{ err }}</span>
@@ -588,7 +726,9 @@ watch(availableCategories, (avail) => {
     <GameModal
       :appid="modalAppid"
       :platform="platform"
+      :as-of-date="gridEndDate"
       @close="modalAppid = null"
+      @pick="modalAppid = $event"
     />
 
     <PageScrollFab />
@@ -673,6 +813,43 @@ h1 {
   margin-bottom: 12px;
   padding-bottom: 12px;
   border-bottom: 1px solid #f1f5f9;
+}
+.top50-insight-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.btn-top50-insight {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid #1d4ed8;
+  background: #2563eb;
+  color: #fff;
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+}
+.btn-top50-insight:hover:not(:disabled) {
+  background: #1d4ed8;
+}
+.btn-top50-insight:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.top50-insight-msg {
+  margin: 0;
+  font-size: 13px;
+  color: #475569;
+  line-height: 1.5;
+}
+.top50-insight-msg--run {
+  color: #1d4ed8;
+  font-weight: 600;
+}
+.top50-insight-msg--err {
+  color: #b45309;
 }
 .range-btn {
   padding: 6px 14px;
