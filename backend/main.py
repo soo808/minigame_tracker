@@ -1072,6 +1072,153 @@ def api_genre_trend(
     }
 
 
+@app.get("/api/insights")
+def api_insights(
+    platform: str = Query("wx", pattern="^(wx|dy|yyb)$"),
+    date: str | None = None,
+):
+    """Dashboard: new entries, dropped, genre (distinct appid), rank movers, tag heat."""
+    empty = {
+        "date": None,
+        "platform": platform,
+        "new_entries": [],
+        "dropped": [],
+        "genre_distribution": [],
+        "rank_movers": [],
+        "tag_heat": [],
+    }
+    with db.get_conn() as conn:
+        d = date or _latest_date(conn, platform)
+        if not d:
+            return empty
+
+        new_rows = conn.execute(
+            """
+            SELECT ds.appid, g.name, g.icon_url, g.genre_major,
+                   MIN(r.rank) AS rank
+            FROM daily_status ds
+            JOIN games g ON g.appid = ds.appid
+            JOIN rankings r ON r.date = ds.date AND r.platform = ds.platform
+              AND r.chart = ds.chart AND r.appid = ds.appid
+            WHERE ds.date = ? AND ds.platform = ? AND ds.is_new = 1
+            GROUP BY ds.appid
+            ORDER BY rank
+            """,
+            (d, platform),
+        ).fetchall()
+
+        dropped_rows = conn.execute(
+            """
+            SELECT ds.appid, g.name, g.icon_url, g.genre_major, ds.rank_delta,
+                   (SELECT COUNT(DISTINCT r2.date)
+                    FROM rankings r2
+                    WHERE r2.appid = ds.appid AND r2.platform = ds.platform
+                      AND r2.date <= ds.date) AS days_on_chart
+            FROM daily_status ds
+            JOIN games g ON g.appid = ds.appid
+            WHERE ds.date = ? AND ds.platform = ? AND ds.is_dropped = 1
+            ORDER BY days_on_chart DESC
+            """,
+            (d, platform),
+        ).fetchall()
+
+        genre_rows = conn.execute(
+            """
+            SELECT COALESCE(g.genre_major, '未分类') AS genre, COUNT(*) AS cnt
+            FROM (
+                SELECT DISTINCT appid FROM rankings
+                WHERE date = ? AND platform = ?
+            ) x
+            JOIN games g ON g.appid = x.appid
+            GROUP BY COALESCE(g.genre_major, '未分类')
+            ORDER BY cnt DESC
+            """,
+            (d, platform),
+        ).fetchall()
+
+        mover_rows = conn.execute(
+            """
+            SELECT ds.appid, g.name, g.icon_url, g.genre_major,
+                   r.rank AS today_rank,
+                   (r.rank - ds.rank_delta) AS prev_rank,
+                   (-ds.rank_delta) AS delta
+            FROM daily_status ds
+            JOIN games g ON g.appid = ds.appid
+            JOIN rankings r
+              ON r.date = ds.date AND r.platform = ds.platform
+             AND r.chart = ds.chart AND r.appid = ds.appid
+            WHERE ds.date = ? AND ds.platform = ?
+              AND ds.rank_delta IS NOT NULL AND ds.rank_delta < 0
+            ORDER BY ds.rank_delta ASC
+            LIMIT 10
+            """,
+            (d, platform),
+        ).fetchall()
+
+        tag_rows = conn.execute(
+            """
+            SELECT MAX(g.tags) AS tags
+            FROM rankings r
+            JOIN games g ON g.appid = r.appid
+            WHERE r.date = ? AND r.platform = ?
+              AND g.tags IS NOT NULL AND TRIM(g.tags) != ''
+            GROUP BY r.appid
+            """,
+            (d, platform),
+        ).fetchall()
+
+        tag_counts: dict[str, int] = {}
+        for row in tag_rows:
+            for tag in _tags_split(row["tags"]):
+                if tag:
+                    tag_counts[tag] = tag_counts.get(tag, 0) + 1
+        tag_heat_sorted = sorted(tag_counts.items(), key=lambda x: -x[1])[:10]
+
+        movers = [
+            {
+                "appid": r["appid"],
+                "name": r["name"],
+                "icon_url": media_cache.rewrite_icon_url(conn, r["icon_url"]),
+                "genre_major": r["genre_major"],
+                "today_rank": int(r["today_rank"]),
+                "prev_rank": int(r["prev_rank"]),
+                "delta": int(r["delta"]),
+            }
+            for r in mover_rows
+        ]
+
+        return {
+            "date": d,
+            "platform": platform,
+            "new_entries": [
+                {
+                    "appid": r["appid"],
+                    "name": r["name"],
+                    "icon_url": media_cache.rewrite_icon_url(conn, r["icon_url"]),
+                    "genre_major": r["genre_major"],
+                    "rank": int(r["rank"]),
+                }
+                for r in new_rows
+            ],
+            "dropped": [
+                {
+                    "appid": r["appid"],
+                    "name": r["name"],
+                    "icon_url": media_cache.rewrite_icon_url(conn, r["icon_url"]),
+                    "genre_major": r["genre_major"],
+                    "days_on_chart": int(r["days_on_chart"]),
+                    "rank_delta": r["rank_delta"],
+                }
+                for r in dropped_rows
+            ],
+            "genre_distribution": [
+                {"genre": r["genre"], "count": int(r["cnt"])} for r in genre_rows
+            ],
+            "rank_movers": movers,
+            "tag_heat": [{"tag": t, "count": c} for t, c in tag_heat_sorted],
+        }
+
+
 # ── Static frontend (production / local without Vite) ─────────────────────
 if FRONT_DIST.is_dir():
     app.mount(
