@@ -6,7 +6,7 @@ import logging
 from typing import Optional
 
 from backend import db
-from backend.llm_env import chat_completion_settings
+from backend.llm_env import chat_completions_create, has_llm_for_chat
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +37,8 @@ def _classify_by_rules(tags: str) -> Optional[tuple[str, str]]:
 
 
 def _ai_classify_batch(games: list[dict]) -> dict[str, tuple[str, str]]:
-    api_key, base_url, model = chat_completion_settings()
-    if not api_key or not base_url:
-        logger.warning("OPENAI_* / DEEPSEEK_* 未配置完整，跳过 AI 分类")
+    if not has_llm_for_chat():
+        logger.warning("未配置可用 LLM，跳过 AI 分类")
         return {}
 
     valid_majors = [
@@ -61,13 +60,9 @@ def _ai_classify_batch(games: list[dict]) -> dict[str, tuple[str, str]]:
         f"{game_list}\n\n只输出 JSON，不要其他内容。"
     )
     try:
-        from openai import OpenAI
-
-        client = OpenAI(api_key=api_key, base_url=base_url)
-        resp = client.chat.completions.create(
-            model=model,
-            max_tokens=800,
+        resp = chat_completions_create(
             messages=[{"role": "user", "content": prompt}],
+            max_tokens=800,
         )
         raw = (resp.choices[0].message.content or "").strip()
         if raw.startswith("```"):

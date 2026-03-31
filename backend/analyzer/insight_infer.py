@@ -11,7 +11,7 @@ import re
 from typing import Any
 
 from backend import db
-from backend.llm_env import chat_completion_settings
+from backend.llm_env import chat_completions_create, has_llm_for_chat
 
 logger = logging.getLogger(__name__)
 
@@ -379,10 +379,9 @@ def _fetch_single_candidate(
 
 
 def _ai_insight_batch(games: list[dict]) -> tuple[list[dict[str, Any]], str | None]:
-    api_key, base_url, model = chat_completion_settings()
-    if not api_key or not base_url:
-        logger.warning("OPENAI_* / DEEPSEEK_* 未配置，跳过 insight 推断")
-        return [], "未配置 API Key 或 Base URL（OPENAI_* 或 DEEPSEEK_*）"
+    if not has_llm_for_chat():
+        logger.warning("未配置可用 LLM（本地 OPENAI_LOCAL_* 或云端 OPENAI_* / DEEPSEEK_*）")
+        return [], "未配置可用 LLM（OPENAI_LOCAL_* 或 OPENAI_* / DEEPSEEK_*）"
 
     slug_lines = [f"  - {slug}（{name}）" for slug, name in CANONICAL_GAMEPLAY_TAGS]
     slug_block = "\n".join(slug_lines)
@@ -411,21 +410,18 @@ def _ai_insight_batch(games: list[dict]) -> tuple[list[dict[str, Any]], str | No
 {chr(10).join(game_lines)}
 """
     try:
-        from openai import OpenAI
-
-        client = OpenAI(api_key=api_key, base_url=base_url)
-        resp = client.chat.completions.create(
-            model=model,
+        resp = chat_completions_create(
+            messages=[{"role": "user", "content": prompt}],
             max_tokens=INSIGHT_MAX_OUTPUT_TOKENS,
             temperature=0.2,
-            messages=[{"role": "user", "content": prompt}],
         )
+        used_model = getattr(resp, "model", None) or "unknown"
         choice = resp.choices[0]
         msg_obj = choice.message
         raw = _message_content_to_str(getattr(msg_obj, "content", None)).strip()
         finish = getattr(choice, "finish_reason", None)
         if not raw:
-            msg = f"模型返回空正文 (finish_reason={finish}, model={model})"
+            msg = f"模型返回空正文 (finish_reason={finish}, model={used_model})"
             logger.warning("insight LLM: %s", msg)
             return [], msg
 
@@ -442,7 +438,7 @@ def _ai_insight_batch(games: list[dict]) -> tuple[list[dict[str, Any]], str | No
             else:
                 hint = "（可能被截断，可减小每批游戏数）" if finish == "length" else ""
                 logger.warning(
-                    "insight LLM JSON: %s model=%s preview=%r", e, model, cleaned[:200]
+                    "insight LLM JSON: %s model=%s preview=%r", e, used_model, cleaned[:200]
                 )
                 return [], f"JSON 解析失败: {e}{hint}"
 
@@ -454,7 +450,7 @@ def _ai_insight_batch(games: list[dict]) -> tuple[list[dict[str, Any]], str | No
             logger.warning(
                 "insight LLM item count: %s model=%s preview=%r",
                 err,
-                model,
+                used_model,
                 cleaned[:240],
             )
             return [], err

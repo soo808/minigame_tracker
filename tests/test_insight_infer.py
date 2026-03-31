@@ -289,9 +289,13 @@ def test_infer_single_appid_llm_returns_empty_array(tmp_path, monkeypatch):
         choices = [_Choice()]
 
     _install_fake_openai(monkeypatch, _Resp())
+
+    def _fake_create(**kwargs):
+        return _Resp()
+
     monkeypatch.setattr(
-        "backend.analyzer.insight_infer.chat_completion_settings",
-        lambda: ("k", "http://example/v1", "gpt-test"),
+        "backend.analyzer.insight_infer.chat_completions_create",
+        _fake_create,
     )
     from backend.analyzer.insight_infer import run_insight_infer_batch
 
@@ -391,9 +395,13 @@ def test_infer_single_appid_llm_returns_single_object_not_array(tmp_path, monkey
         choices = [_Choice()]
 
     _install_fake_openai(monkeypatch, _Resp())
+
+    def _fake_create(**kwargs):
+        return _Resp()
+
     monkeypatch.setattr(
-        "backend.analyzer.insight_infer.chat_completion_settings",
-        lambda: ("k", "http://example/v1", "gpt-test"),
+        "backend.analyzer.insight_infer.chat_completions_create",
+        _fake_create,
     )
     from backend.analyzer.insight_infer import run_insight_infer_batch
 

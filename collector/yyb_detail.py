@@ -11,7 +11,7 @@ from typing import Optional
 import httpx
 
 from backend import db
-from backend.llm_env import chat_completion_settings
+from backend.llm_env import chat_completions_create, has_llm_for_chat
 
 logger = logging.getLogger(__name__)
 
@@ -67,18 +67,11 @@ def fetch_detail(appid: str) -> Optional[str]:
 
 
 def _ai_generate_description(name: str, tags: Optional[str]) -> Optional[str]:
-    api_key, base_url, model = chat_completion_settings()
-    if not api_key or not base_url:
-        logger.warning(
-            "OPENAI_API_KEY + OPENAI_BASE_URL (或旧版 DEEPSEEK_*) 未设置，跳过 AI 描述兜底"
-        )
+    if not has_llm_for_chat():
+        logger.warning("未配置可用 LLM，跳过 AI 描述兜底")
         return None
     try:
-        from openai import OpenAI
-
-        client = OpenAI(api_key=api_key, base_url=base_url)
-        resp = client.chat.completions.create(
-            model=model,
+        resp = chat_completions_create(
             max_tokens=100,
             messages=[
                 {
