@@ -1,4 +1,6 @@
-"""Manual top-50 insight run for wx, dy, yyb (same as AUTO_TOP50_INSIGHT_AFTER_COLLECT).
+"""Manual union-chart insight run for wx, dy, yyb (same logic as nine-chart auto job).
+
+Uses INSIGHT_CHART_TOP_N (default 100), INSIGHT_BATCH_SIZE (default 22), TOP cap 350.
 
 Run from repo root with .env / OPENAI_* configured:
 
@@ -14,15 +16,20 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from backend import db
-from backend.analyzer.insight_infer import TOP50_CHARTS_MAX_LIMIT, run_insight_infer_batch
+from backend.analyzer.insight_infer import (
+    TOP50_CHARTS_MAX_LIMIT,
+    insight_batch_size_default,
+    run_insight_infer_batch,
+)
 
 
 def main() -> None:
     db.init_db()
+    bsz = insight_batch_size_default()
     for plat in ("wx", "dy", "yyb"):
         out = run_insight_infer_batch(
             limit=TOP50_CHARTS_MAX_LIMIT,
-            batch_size=12,
+            batch_size=bsz,
             only_missing=True,
             force=False,
             platform=plat,

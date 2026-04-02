@@ -4,7 +4,6 @@ from __future__ import annotations
 import logging
 import os
 import random
-import threading
 import time
 from datetime import date, datetime, timedelta, time as dtime
 from zoneinfo import ZoneInfo
@@ -171,82 +170,6 @@ def _env_truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
-def _run_auto_top50_wx_dy_background() -> None:
-    """After gravity collect: optional LLM top-50 for wx and dy (daemon thread)."""
-    if not _env_truthy("AUTO_TOP50_INSIGHT_AFTER_COLLECT"):
-        return
-
-    def worker() -> None:
-        from backend.analyzer.insight_infer import (
-            TOP50_CHARTS_MAX_LIMIT,
-            run_insight_infer_batch,
-        )
-
-        logger.info("AUTO_TOP50_INSIGHT_AFTER_COLLECT: wx/dy background run starting")
-        try:
-            for plat in ("wx", "dy"):
-                out = run_insight_infer_batch(
-                    limit=TOP50_CHARTS_MAX_LIMIT,
-                    batch_size=12,
-                    only_missing=True,
-                    force=False,
-                    platform=plat,
-                    ranking_date=None,
-                    top50_charts=True,
-                    insight_gap_only=True,
-                )
-                logger.info(
-                    "auto top50 insight done platform=%s candidates=%s batches=%s err=%s",
-                    plat,
-                    out.get("candidates"),
-                    out.get("batches"),
-                    bool(out.get("errors")),
-                )
-        except Exception:
-            logger.exception("auto top50 insight wx/dy failed")
-
-    threading.Thread(
-        target=worker, daemon=True, name="auto-top50-wx-dy"
-    ).start()
-
-
-def _run_auto_top50_yyb_background() -> None:
-    """After YYB collect: optional LLM top-50 for yyb (daemon thread)."""
-    if not _env_truthy("AUTO_TOP50_INSIGHT_AFTER_COLLECT"):
-        return
-
-    def worker() -> None:
-        from backend.analyzer.insight_infer import (
-            TOP50_CHARTS_MAX_LIMIT,
-            run_insight_infer_batch,
-        )
-
-        logger.info("AUTO_TOP50_INSIGHT_AFTER_COLLECT: yyb background run starting")
-        try:
-            out = run_insight_infer_batch(
-                limit=TOP50_CHARTS_MAX_LIMIT,
-                batch_size=12,
-                only_missing=True,
-                force=False,
-                platform="yyb",
-                ranking_date=None,
-                top50_charts=True,
-                insight_gap_only=True,
-            )
-            logger.info(
-                "auto top50 insight done platform=yyb candidates=%s batches=%s err=%s",
-                out.get("candidates"),
-                out.get("batches"),
-                bool(out.get("errors")),
-            )
-        except Exception:
-            logger.exception("auto top50 insight yyb failed")
-
-    threading.Thread(
-        target=worker, daemon=True, name="auto-top50-yyb"
-    ).start()
-
-
 def collect_yyb_charts(date: str, *, force: bool = False) -> None:
     """
     YYB 三榜；榜间 3~10s。
@@ -388,6 +311,17 @@ def _tomorrow_random_yyb_collect() -> datetime:
     return _random_yyb_fire_in_window(tmr)
 
 
+def _adx_sync_time(target_day: date) -> datetime:
+    """ADX sync at 12:00-12:10 Asia/Shanghai (after chart collection)."""
+    base = datetime.combine(target_day, dtime(12, 0), tzinfo=TZ)
+    return base + timedelta(seconds=random.randint(0, 600))
+
+
+def _tomorrow_adx_sync_time() -> datetime:
+    tmr = datetime.now(TZ).date() + timedelta(days=1)
+    return _adx_sync_time(tmr)
+
+
 _scheduler: BackgroundScheduler | None = None
 
 
@@ -400,7 +334,6 @@ def start_scheduler() -> BackgroundScheduler:
 
     def gravity_collect_then_reschedule() -> None:
         collect_all_charts()
-        _run_auto_top50_wx_dy_background()
         nxt = _tomorrow_random_collect()
         sched.add_job(
             gravity_collect_then_reschedule,
@@ -415,7 +348,6 @@ def start_scheduler() -> BackgroundScheduler:
             "gravity same-day catch-up (started after 11:30 Shanghai, incomplete rankings)"
         )
         collect_all_charts(ignore_collection_deadline=True)
-        _run_auto_top50_wx_dy_background()
         nxt = _tomorrow_random_collect()
         sched.add_job(
             gravity_collect_then_reschedule,
@@ -436,7 +368,6 @@ def start_scheduler() -> BackgroundScheduler:
         except Exception:
             logger.exception("wx YYB backfill failed date=%s", day)
         _post_collect_enrichment()
-        _run_auto_top50_yyb_background()
         nxt = _tomorrow_random_yyb_collect()
         sched.add_job(
             yyb_collect_then_reschedule,
@@ -445,6 +376,26 @@ def start_scheduler() -> BackgroundScheduler:
             replace_existing=True,
         )
         logger.info("next yyb collection scheduled at %s", nxt)
+
+    def adx_sync_then_reschedule() -> None:
+        from collector.adx_ingest import colleague_adx_configured, sync_from_colleague
+
+        if colleague_adx_configured():
+            try:
+                result = sync_from_colleague(dry_run=False)
+                logger.info("ADX sync completed: %s", result)
+            except Exception:
+                logger.exception("ADX sync failed")
+        else:
+            logger.debug("ADX sync skipped: COLLEAGUE_ADX_URL not set")
+        nxt = _tomorrow_adx_sync_time()
+        sched.add_job(
+            adx_sync_then_reschedule,
+            DateTrigger(run_date=nxt),
+            id="daily_adx_sync",
+            replace_existing=True,
+        )
+        logger.info("next ADX sync scheduled at %s", nxt)
 
     first_g, gravity_catchup = _first_scheduled_run()
     first_y = _first_scheduled_yyb_run()
@@ -465,13 +416,26 @@ def start_scheduler() -> BackgroundScheduler:
         id="daily_collect_yyb",
         replace_existing=True,
     )
+
+    # ADX sync: first run today if before 12:10, otherwise tomorrow
+    now = datetime.now(TZ)
+    today_adx = _adx_sync_time(now.date())
+    first_adx = today_adx if now < today_adx else _tomorrow_adx_sync_time()
+    sched.add_job(
+        adx_sync_then_reschedule,
+        DateTrigger(run_date=first_adx),
+        id="daily_adx_sync",
+        replace_existing=True,
+    )
+
     sched.start()
     _scheduler = sched
     logger.info(
-        "scheduler started; first gravity at %s (%s), first yyb at %s (Asia/Shanghai)",
+        "scheduler started; first gravity at %s (%s), first yyb at %s, first adx at %s (Asia/Shanghai)",
         first_g,
         "catch-up" if gravity_catchup else "normal",
         first_y,
+        first_adx,
     )
     return sched
 

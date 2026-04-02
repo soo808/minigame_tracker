@@ -69,6 +69,50 @@ def has_llm_for_chat() -> bool:
     return bool(iter_chat_endpoints())
 
 
+def http_timeout_seconds() -> float:
+    """HTTP timeout for OpenAI-compatible clients (local 32B can be slow)."""
+    raw = (
+        os.environ.get("LLM_HTTP_TIMEOUT")
+        or os.environ.get("OPENAI_HTTP_TIMEOUT")
+        or "180"
+    ).strip()
+    try:
+        t = float(raw)
+    except ValueError:
+        t = 180.0
+    return max(30.0, min(t, 3600.0))
+
+
+def extract_message_assistant_text(message: Any) -> str:
+    """
+    Prefer message.content; if empty, fall back to reasoning (Qwen3 / Ollama thinking).
+    Tested with OpenAI SDK ChatCompletionMessage; gateways may set reasoning or model_extra.
+    """
+    content = (getattr(message, "content", None) or "").strip()
+    if content:
+        return content
+    reasoning = getattr(message, "reasoning", None)
+    if reasoning is not None and str(reasoning).strip():
+        return str(reasoning).strip()
+    extra = getattr(message, "model_extra", None)
+    if isinstance(extra, dict):
+        r = extra.get("reasoning")
+        if r is not None and str(r).strip():
+            return str(r).strip()
+    return ""
+
+
+def extract_completion_text(resp: Any) -> str:
+    """First choice assistant message text (content or reasoning fallback)."""
+    choices = getattr(resp, "choices", None) or []
+    if not choices:
+        return ""
+    msg = getattr(choices[0], "message", None)
+    if msg is None:
+        return ""
+    return extract_message_assistant_text(msg)
+
+
 def _should_fallback(exc: BaseException) -> bool:
     if isinstance(exc, ImportError):
         return False
@@ -114,10 +158,13 @@ def chat_completions_create(
 
     from openai import OpenAI
 
+    timeout = http_timeout_seconds()
     last_exc: BaseException | None = None
     for i, (api_key, base_url, model) in enumerate(endpoints):
         try:
-            client = OpenAI(api_key=api_key, base_url=base_url)
+            client = OpenAI(
+                api_key=api_key, base_url=base_url, timeout=timeout
+            )
             payload: dict[str, Any] = {"model": model, "messages": messages, **extra}
             if max_tokens is not None:
                 payload["max_tokens"] = max_tokens

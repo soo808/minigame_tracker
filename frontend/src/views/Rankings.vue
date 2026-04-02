@@ -358,7 +358,7 @@ async function startTop50Insight() {
       body: JSON.stringify({
         platform: platform.value,
         ranking_date: selectedDate.value,
-        batch_size: 12,
+        batch_size: 22,
         insight_gap_only: true,
         force: false,
       }),

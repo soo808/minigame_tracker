@@ -50,6 +50,39 @@ def maybe_run_analysis_after_snapshot(date: str) -> None:
         run_analysis(date, YYB_REQUIRED_CHARTS)
         _run_yyb_tag_analysis(date)
 
+    try:
+        from backend.analyzer.insight_infer import schedule_auto_union_insight_if_ready
+
+        schedule_auto_union_insight_if_ready(date)
+    except Exception:
+        logger.exception("schedule_auto_union_insight_if_ready failed date=%s", date)
+
+    try:
+        from backend.analyzer.insight_infer import schedule_auto_full_insight_if_ready
+
+        schedule_auto_full_insight_if_ready(date)
+    except Exception:
+        logger.exception("schedule_auto_full_insight_if_ready failed date=%s", date)
+
+    _schedule_auto_trend_report(date)
+
+
+def _schedule_auto_trend_report(date: str) -> None:
+    """Generate platform-wide trend reports after collection completes."""
+    import threading
+
+    def worker() -> None:
+        from backend.adx_insights import run_platform_trend_report
+
+        for plat in ("wx", "dy", "yyb"):
+            try:
+                run_platform_trend_report(platform=plat, end_date=date, persist=True)
+                logger.info("auto trend report done platform=%s date=%s", plat, date)
+            except Exception:
+                logger.exception("auto trend report failed platform=%s", plat)
+
+    threading.Thread(target=worker, daemon=True, name=f"auto-trend-{date}").start()
+
 
 def _run_yyb_tag_analysis(date: str) -> None:
     try:

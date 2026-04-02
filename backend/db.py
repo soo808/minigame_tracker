@@ -178,5 +178,84 @@ def init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_ggt_appid ON game_gameplay_tags(appid);
             CREATE INDEX IF NOT EXISTS idx_virality_appid ON virality_assumptions(appid);
+
+            CREATE TABLE IF NOT EXISTS auto_insight_runs (
+              date          TEXT NOT NULL PRIMARY KEY,
+              created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS adx_creatives (
+              creative_id   TEXT PRIMARY KEY,
+              title         TEXT,
+              body_text     TEXT,
+              advertiser_id TEXT,
+              plan_id       TEXT,
+              raw_json      TEXT,
+              fetched_at    TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS adx_creative_daily_stats (
+              creative_id   TEXT NOT NULL REFERENCES adx_creatives(creative_id) ON DELETE CASCADE,
+              stat_date     TEXT NOT NULL,
+              impressions   INTEGER,
+              clicks        INTEGER,
+              spend_cents   INTEGER,
+              PRIMARY KEY (creative_id, stat_date)
+            );
+            CREATE INDEX IF NOT EXISTS idx_adx_stats_date ON adx_creative_daily_stats(stat_date);
+
+            CREATE TABLE IF NOT EXISTS adx_creative_game_map (
+              creative_id   TEXT NOT NULL REFERENCES adx_creatives(creative_id) ON DELETE CASCADE,
+              appid         TEXT NOT NULL REFERENCES games(appid) ON DELETE CASCADE,
+              PRIMARY KEY (creative_id, appid)
+            );
+
+            CREATE TABLE IF NOT EXISTS adx_llm_reports (
+              id            INTEGER PRIMARY KEY AUTOINCREMENT,
+              scope_type    TEXT NOT NULL,
+              scope_key     TEXT NOT NULL,
+              report_date   TEXT NOT NULL,
+              payload_json  TEXT NOT NULL,
+              model         TEXT,
+              created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+              UNIQUE(scope_type, scope_key, report_date)
+            );
+            """
+        )
+
+        # -- ADX creatives schema migration (add columns from colleague API) --
+        _adx_new_cols = [
+            ("product_id", "TEXT"),
+            ("product_name", "TEXT"),
+            ("product_icon", "TEXT"),
+            ("platform", "TEXT"),
+            ("material_type", "TEXT"),
+            ("grade", "TEXT"),
+            ("composite_score", "REAL"),
+            ("days_on_chart", "INTEGER"),
+            ("rising_speed", "REAL"),
+            ("accel_3d", "REAL"),
+            ("material_num", "INTEGER"),
+            ("creative_num", "INTEGER"),
+            ("exposure_num", "INTEGER"),
+            ("exposure_per_creative", "INTEGER"),
+            ("media_spread", "REAL"),
+            ("sustain_rate_7d", "REAL"),
+            ("freshness", "REAL"),
+            ("pic_list_json", "TEXT"),
+            ("video_list_json", "TEXT"),
+        ]
+        for col, typedef in _adx_new_cols:
+            try:
+                conn.execute(
+                    f"ALTER TABLE adx_creatives ADD COLUMN {col} {typedef}"
+                )
+            except sqlite3.OperationalError:
+                pass  # column already exists
+
+        conn.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_adx_product_id ON adx_creatives(product_id);
+            CREATE INDEX IF NOT EXISTS idx_adx_grade ON adx_creatives(grade);
             """
         )

@@ -21,5 +21,10 @@ export const router = createRouter({
       name: "qa",
       component: () => import("./views/QA.vue"),
     },
+    {
+      path: "/adx",
+      name: "adx",
+      component: () => import("./views/AdxCreatives.vue"),
+    },
   ],
 });

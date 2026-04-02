@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import threading
 from typing import Any
 
 from backend import db
@@ -101,8 +103,29 @@ def _resolve_gameplay_slug(
 
 
 LLM_BATCH_UPDATED_BY = "llm_batch"
-DEFAULT_BATCH_SIZE = 12
-TOP50_CHARTS_MAX_LIMIT = 200
+DEFAULT_BATCH_SIZE = 30
+# Max candidates for union-of-charts mode (3 charts × top_n, de-duped).
+UNION_CHARTS_MAX_LIMIT = 800
+TOP50_CHARTS_MAX_LIMIT = UNION_CHARTS_MAX_LIMIT  # backward compat for imports
+
+
+def insight_chart_top_n() -> int:
+    """Per-chart rank cutoff for union mode (env INSIGHT_CHART_TOP_N, default 100)."""
+    raw = os.environ.get("INSIGHT_CHART_TOP_N", "100").strip()
+    try:
+        n = int(raw)
+    except ValueError:
+        n = 100
+    return max(1, min(n, 200))
+
+
+def insight_batch_size_default() -> int:
+    raw = os.environ.get("INSIGHT_BATCH_SIZE", str(DEFAULT_BATCH_SIZE)).strip()
+    try:
+        n = int(raw)
+    except ValueError:
+        n = DEFAULT_BATCH_SIZE
+    return max(1, min(n, 50))
 
 
 def db_charts_for_platform(platform: str) -> tuple[str, ...]:
@@ -275,18 +298,18 @@ def _fetch_candidates(
     return [dict(r) for r in rows], resolved
 
 
-def _fetch_top50_union_candidates(
+def _fetch_chart_union_candidates(
     conn,
     platform: str,
     resolved_date: str,
     *,
+    chart_top_n: int,
     insight_gap_only: bool,
     limit: int,
 ) -> list[dict[str, Any]]:
     """
-    Games appearing in the top 50 on any of the three charts for ``platform`` on
-    ``resolved_date``, excluding manual monetization. Optionally keep only games
-    missing monetization / unknown model / gameplay tags / virality rows.
+    Games in top ``chart_top_n`` on any of the three charts for ``platform`` on
+    ``resolved_date``, excluding manual monetization. Optionally gap-only.
     """
     charts = db_charts_for_platform(platform)
     ph = ",".join("?" * len(charts))
@@ -306,16 +329,16 @@ def _fetch_top50_union_candidates(
           )
         """
     sql = f"""
-        WITH top50 AS (
+        WITH chart_union AS (
           SELECT DISTINCT r.appid
           FROM rankings r
-          WHERE r.date = ? AND r.platform = ? AND r.chart IN ({ph}) AND r.rank <= 50
+          WHERE r.date = ? AND r.platform = ? AND r.chart IN ({ph}) AND r.rank <= ?
         ),
         br AS (
           SELECT r.appid, MIN(r.rank) AS best_rank
           FROM rankings r
-          INNER JOIN top50 t ON t.appid = r.appid
-          WHERE r.date = ? AND r.platform = ? AND r.chart IN ({ph}) AND r.rank <= 50
+          INNER JOIN chart_union t ON t.appid = r.appid
+          WHERE r.date = ? AND r.platform = ? AND r.chart IN ({ph}) AND r.rank <= ?
           GROUP BY r.appid
         )
         SELECT g.appid, g.name, g.tags, g.description, g.genre_major, g.genre_minor
@@ -331,9 +354,87 @@ def _fetch_top50_union_candidates(
         resolved_date,
         platform,
         *charts,
+        chart_top_n,
         resolved_date,
         platform,
         *charts,
+        chart_top_n,
+        limit,
+    ]
+    rows = conn.execute(sql, tuple(params)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _fetch_top50_union_candidates(
+    conn,
+    platform: str,
+    resolved_date: str,
+    *,
+    insight_gap_only: bool,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Backward-compat name: union of top **50** per chart (fixed N, not env)."""
+    return _fetch_chart_union_candidates(
+        conn,
+        platform,
+        resolved_date,
+        chart_top_n=50,
+        insight_gap_only=insight_gap_only,
+        limit=limit,
+    )
+
+
+def _fetch_full_coverage_candidates(
+    conn,
+    platform: str,
+    resolved_date: str,
+    *,
+    insight_gap_only: bool,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """All games on any chart for ``platform`` on ``resolved_date``, no rank cutoff."""
+    charts = db_charts_for_platform(platform)
+    ph = ",".join("?" * len(charts))
+    gap_sql = ""
+    if insight_gap_only:
+        gap_sql = """
+          AND (
+            m.appid IS NULL
+            OR m.monetization_model IS NULL
+            OR m.monetization_model = 'unknown'
+            OR NOT EXISTS (
+              SELECT 1 FROM game_gameplay_tags ggt WHERE ggt.appid = g.appid
+            )
+            OR NOT EXISTS (
+              SELECT 1 FROM virality_assumptions v WHERE v.appid = g.appid
+            )
+          )
+        """
+    sql = f"""
+        WITH chart_all AS (
+          SELECT DISTINCT r.appid
+          FROM rankings r
+          WHERE r.date = ? AND r.platform = ? AND r.chart IN ({ph})
+        ),
+        br AS (
+          SELECT r.appid, MIN(r.rank) AS best_rank
+          FROM rankings r
+          INNER JOIN chart_all t ON t.appid = r.appid
+          WHERE r.date = ? AND r.platform = ? AND r.chart IN ({ph})
+          GROUP BY r.appid
+        )
+        SELECT g.appid, g.name, g.tags, g.description, g.genre_major, g.genre_minor
+        FROM games g
+        INNER JOIN br ON br.appid = g.appid
+        LEFT JOIN game_monetization m ON m.appid = g.appid
+        WHERE (m.source IS NULL OR m.source != 'manual')
+        {gap_sql}
+        ORDER BY br.best_rank ASC, g.appid ASC
+        LIMIT ?
+    """
+    params: list[Any] = [
+        resolved_date, platform, *charts,
+        resolved_date, platform, *charts,
         limit,
     ]
     rows = conn.execute(sql, tuple(params)).fetchall()
@@ -601,22 +702,27 @@ def _apply_batch(
 def run_insight_infer_batch(
     *,
     limit: int = 120,
-    batch_size: int = DEFAULT_BATCH_SIZE,
+    batch_size: int | None = None,
     only_missing: bool = True,
     force: bool = False,
     platform: str = "wx",
     ranking_date: str | None = None,
     appid: str | None = None,
     top50_charts: bool = False,
+    full_coverage: bool = False,
     insight_gap_only: bool = True,
+    chart_top_n: int | None = None,
 ) -> dict[str, Any]:
     """
     Run LLM batches over up to ``limit`` candidate games.
     If ``appid`` is set, only that game is inferred (ignores ranking-based selection).
-    If ``top50_charts``, candidates are the union of top-50 across three platform charts.
+    If ``top50_charts``, candidates are the union of top-N (``INSIGHT_CHART_TOP_N``, default 100)
+    across three platform charts.
+    If ``full_coverage``, candidates are ALL games on any chart (no rank cutoff).
     Otherwise, when rankings exist for ``platform`` and ``ranking_date`` (or latest),
     candidates are chart games ordered by best rank that day.
     """
+    bs = batch_size if batch_size is not None else insight_batch_size_default()
     total: dict[str, Any] = {
         "candidates": 0,
         "batches": 0,
@@ -628,6 +734,9 @@ def run_insight_infer_batch(
         "ranking_date": None,
         "appid": None,
         "top50_charts": bool(top50_charts),
+        "full_coverage": bool(full_coverage),
+        "chart_top_n": chart_top_n if chart_top_n is not None else insight_chart_top_n(),
+        "batch_size": bs,
     }
 
     with db.get_conn() as conn:
@@ -646,16 +755,34 @@ def run_insight_infer_batch(
             resolved = _resolve_ranking_date(conn, platform, ranking_date)
             total["ranking_date"] = resolved
             if not resolved:
-                total["errors"].append("该平台暂无榜单日期，无法推断前50并集")
+                total["errors"].append("该平台暂无榜单日期，无法推断三榜并集")
                 return total
-            cap = min(limit, TOP50_CHARTS_MAX_LIMIT)
+            ctn = chart_top_n if chart_top_n is not None else insight_chart_top_n()
+            total["chart_top_n"] = ctn
+            cap = min(limit, UNION_CHARTS_MAX_LIMIT)
             gap = insight_gap_only and not force
-            candidates = _fetch_top50_union_candidates(
+            candidates = _fetch_chart_union_candidates(
+                conn,
+                platform,
+                resolved,
+                chart_top_n=ctn,
+                insight_gap_only=gap,
+                limit=cap,
+            )
+            total["candidates"] = len(candidates)
+        elif full_coverage:
+            resolved = _resolve_ranking_date(conn, platform, ranking_date)
+            total["ranking_date"] = resolved
+            if not resolved:
+                total["errors"].append("该平台暂无榜单日期，无法进行全量推断")
+                return total
+            gap = insight_gap_only and not force
+            candidates = _fetch_full_coverage_candidates(
                 conn,
                 platform,
                 resolved,
                 insight_gap_only=gap,
-                limit=cap,
+                limit=min(limit, UNION_CHARTS_MAX_LIMIT),
             )
             total["candidates"] = len(candidates)
         else:
@@ -672,8 +799,8 @@ def run_insight_infer_batch(
 
         fail_batches = 0
         first_fail: str | None = None
-        for i in range(0, len(candidates), batch_size):
-            chunk = candidates[i : i + batch_size]
+        for i in range(0, len(candidates), bs):
+            chunk = candidates[i : i + bs]
             items, batch_err = _ai_insight_batch(chunk)
             if not items and chunk:
                 fail_batches += 1
@@ -688,7 +815,147 @@ def run_insight_infer_batch(
 
         if fail_batches:
             total["errors"].append(
-                f"共 {fail_batches} 批失败（每批最多 {batch_size} 款）；首错：{first_fail}"
+                f"共 {fail_batches} 批失败（每批最多 {bs} 款）；首错：{first_fail}"
             )
 
     return total
+
+
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def schedule_auto_union_insight_if_ready(date: str) -> None:
+    """
+    When all 9 charts (wx3+dy3+yyb3) have ok/partial snapshots for ``date`` and
+    AUTO_TOP50_INSIGHT_AFTER_COLLECT is set, run union insight once per date (wx, dy, yyb).
+    """
+    if not _env_truthy("AUTO_TOP50_INSIGHT_AFTER_COLLECT"):
+        return
+    from backend.analyzer.status import REQUIRED_CHARTS, YYB_REQUIRED_CHARTS
+
+    all_nine = REQUIRED_CHARTS | YYB_REQUIRED_CHARTS
+    with db.get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT platform, chart FROM snapshots
+            WHERE date = ? AND status IN ('ok', 'partial')
+            """,
+            (date,),
+        ).fetchall()
+        received = {(r["platform"], r["chart"]) for r in rows}
+        if not all_nine <= received:
+            return
+        cur = conn.execute(
+            """
+            INSERT OR IGNORE INTO auto_insight_runs (date, created_at)
+            VALUES (?, datetime('now'))
+            """,
+            (date,),
+        )
+        if cur.rowcount == 0:
+            return
+
+    def worker() -> None:
+        ctn = insight_chart_top_n()
+        cap = UNION_CHARTS_MAX_LIMIT
+        bsz = insight_batch_size_default()
+        logger.info(
+            "auto union insight (9 charts ready) date=%s chart_top_n=%s batch_size=%s",
+            date,
+            ctn,
+            bsz,
+        )
+        try:
+            for plat in ("wx", "dy", "yyb"):
+                out = run_insight_infer_batch(
+                    limit=cap,
+                    batch_size=bsz,
+                    only_missing=True,
+                    force=False,
+                    platform=plat,
+                    ranking_date=date,
+                    top50_charts=True,
+                    insight_gap_only=True,
+                    chart_top_n=ctn,
+                )
+                logger.info(
+                    "auto union insight done date=%s platform=%s candidates=%s batches=%s err=%s",
+                    date,
+                    plat,
+                    out.get("candidates"),
+                    out.get("batches"),
+                    bool(out.get("errors")),
+                )
+        except Exception:
+            logger.exception("auto union insight failed date=%s", date)
+
+    threading.Thread(
+        target=worker, daemon=True, name=f"auto-union-insight-{date}"
+    ).start()
+
+
+def schedule_auto_full_insight_if_ready(date: str) -> None:
+    """After union insight, optionally run full-coverage on ALL chart games (no rank cutoff).
+
+    Guarded by AUTO_FULL_INSIGHT_AFTER_COLLECT env var and ``auto_insight_runs``
+    with a ``full_`` prefix to avoid re-runs.
+    """
+    if not _env_truthy("AUTO_FULL_INSIGHT_AFTER_COLLECT"):
+        return
+    from backend.analyzer.status import REQUIRED_CHARTS, YYB_REQUIRED_CHARTS
+
+    all_nine = REQUIRED_CHARTS | YYB_REQUIRED_CHARTS
+    with db.get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT platform, chart FROM snapshots
+            WHERE date = ? AND status IN ('ok', 'partial')
+            """,
+            (date,),
+        ).fetchall()
+        received = {(r["platform"], r["chart"]) for r in rows}
+        if not all_nine <= received:
+            return
+        cur = conn.execute(
+            """
+            INSERT OR IGNORE INTO auto_insight_runs (date, created_at)
+            VALUES (?, datetime('now'))
+            """,
+            (f"full_{date}",),
+        )
+        if cur.rowcount == 0:
+            return
+
+    def worker() -> None:
+        bsz = insight_batch_size_default()
+        cap = UNION_CHARTS_MAX_LIMIT
+        logger.info(
+            "auto full-coverage insight (9 charts ready) date=%s batch_size=%s",
+            date, bsz,
+        )
+        try:
+            for plat in ("wx", "dy", "yyb"):
+                out = run_insight_infer_batch(
+                    limit=cap,
+                    batch_size=bsz,
+                    only_missing=True,
+                    force=False,
+                    platform=plat,
+                    ranking_date=date,
+                    full_coverage=True,
+                    insight_gap_only=True,
+                )
+                logger.info(
+                    "auto full insight done date=%s platform=%s candidates=%s batches=%s err=%s",
+                    date, plat,
+                    out.get("candidates"),
+                    out.get("batches"),
+                    bool(out.get("errors")),
+                )
+        except Exception:
+            logger.exception("auto full insight failed date=%s", date)
+
+    threading.Thread(
+        target=worker, daemon=True, name=f"auto-full-insight-{date}"
+    ).start()

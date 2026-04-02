@@ -25,15 +25,21 @@ from backend.analyzer import trends
 from backend.analyzer.classify import classify_games_batch
 from backend.analyzer.insight_infer import (
     TOP50_CHARTS_MAX_LIMIT,
+    insight_chart_top_n,
     run_insight_infer_batch,
 )
 from backend.ingest_service import apply_chart_payload, map_ingest_chart
 from backend.models import (
+    AdxInsightsAnalyzeBody,
+    AdxSyncBody,
     GameplayAssignBody,
     IngestBody,
     InsightInferBatchBody,
+    InsightInferFullBody,
     InsightInferTop50Body,
     MonetizationUpsertBody,
+    PlatformTrendReportBody,
+    QARequest,
     ViralityUpsertBody,
 )
 from collector.scheduler import collect_yyb_charts, shutdown_scheduler, start_scheduler
@@ -87,7 +93,7 @@ def _charts_for_api(platform: str) -> list[tuple[str, str]]:
 def _game_insight_ui_flags(
     conn, appid: str, platform: str, d: str | None
 ) -> dict[str, bool]:
-    """Top-50 union on snapshot date + whether to show per-game AI infer CTA."""
+    """Top-N chart union on snapshot date + whether to show per-game AI infer CTA."""
     m = conn.execute(
         "SELECT source FROM game_monetization WHERE appid = ?", (appid,)
     ).fetchone()
@@ -108,14 +114,15 @@ def _game_insight_ui_flags(
     if d:
         charts = [c for _, c in _charts_for_api(platform)]
         ph = ",".join("?" * len(charts))
+        top_n = insight_chart_top_n()
         r = conn.execute(
             f"""
             SELECT 1 FROM rankings
             WHERE date = ? AND platform = ? AND appid = ?
-              AND chart IN ({ph}) AND rank <= 50
+              AND chart IN ({ph}) AND rank <= ?
             LIMIT 1
             """,
-            (d, platform, appid, *charts),
+            (d, platform, appid, *charts, top_n),
         ).fetchone()
         in_top50 = r is not None
 
@@ -546,6 +553,7 @@ async def _insight_infer_async(body: InsightInferBatchBody) -> dict:
         appid=body.appid,
         top50_charts=body.top50_charts,
         insight_gap_only=body.insight_gap_only,
+        chart_top_n=body.chart_top_n,
     )
 
 
@@ -566,6 +574,7 @@ async def _run_insight_top50_job(job_id: str, body: InsightInferTop50Body) -> No
             appid=None,
             top50_charts=True,
             insight_gap_only=body.insight_gap_only,
+            chart_top_n=body.chart_top_n,
         )
         _INSIGHT_TOP50_JOBS[job_id] = {"status": "done", "job_id": job_id, **result}
     except Exception as exc:
@@ -586,7 +595,7 @@ async def api_insight_infer_batch(body: InsightInferBatchBody):
 
 @app.post("/api/insight/infer-top50")
 async def api_insight_infer_top50(body: InsightInferTop50Body):
-    """异步任务：三榜各前50并集洞察（轮询 GET /api/insight/infer-job/{job_id}）。"""
+    """异步任务：三榜各前 N 并集洞察（轮询 GET /api/insight/infer-job/{job_id}）。"""
     job_id = secrets.token_hex(8)
     _INSIGHT_TOP50_JOBS[job_id] = {"status": "pending", "job_id": job_id}
     asyncio.create_task(_run_insight_top50_job(job_id, body))
@@ -601,11 +610,298 @@ def api_insight_infer_job(job_id: str):
     return row
 
 
+async def _run_insight_full_job(job_id: str, body: InsightInferFullBody) -> None:
+    entry = _INSIGHT_TOP50_JOBS.get(job_id)
+    if entry is None:
+        return
+    entry["status"] = "running"
+    try:
+        from backend.analyzer.insight_infer import UNION_CHARTS_MAX_LIMIT as _CAP
+
+        result = await asyncio.to_thread(
+            run_insight_infer_batch,
+            limit=_CAP,
+            batch_size=body.batch_size,
+            only_missing=True,
+            force=body.force,
+            platform=body.platform,
+            ranking_date=body.ranking_date,
+            appid=None,
+            top50_charts=False,
+            full_coverage=True,
+            insight_gap_only=body.insight_gap_only,
+        )
+        _INSIGHT_TOP50_JOBS[job_id] = {"status": "done", "job_id": job_id, **result}
+    except Exception as exc:
+        logger.exception("infer-full job %s failed", job_id)
+        _INSIGHT_TOP50_JOBS[job_id] = {
+            "status": "error",
+            "job_id": job_id,
+            "errors": [str(exc)],
+        }
+
+
+@app.post("/api/insight/infer-full")
+async def api_insight_infer_full(body: InsightInferFullBody):
+    """异步任务：全量推断（覆盖所有在榜游戏，不限排名）。轮询 GET /api/insight/infer-job/{job_id}。"""
+    job_id = secrets.token_hex(8)
+    _INSIGHT_TOP50_JOBS[job_id] = {"status": "pending", "job_id": job_id}
+    asyncio.create_task(_run_insight_full_job(job_id, body))
+    return {"ok": True, "job_id": job_id}
+
+
+@app.get("/api/adx/summary")
+def api_adx_summary(
+    platform: str = Query("wx", pattern="^(wx|dy|yyb)$"),
+    appid: str | None = None,
+    end_date: str | None = None,
+    days: int = Query(30, ge=7, le=90),
+):
+    """近 N 日排名序列（可选 appid）+ 三榜并集品类占比趋势（统计，无 LLM）。"""
+    from backend.adx_insights import adx_summary_payload
+
+    return adx_summary_payload(
+        appid=appid, platform=platform, end_date=end_date, days=days
+    )
+
+
+@app.post("/api/adx/insights/analyze")
+async def api_adx_insights_analyze(body: AdxInsightsAnalyzeBody):
+    """将压缩后的榜单特征送 LLM，返回结构化解读；可选写入 adx_llm_reports。"""
+    from backend.adx_insights import run_adx_llm_analyze
+
+    try:
+        return await asyncio.to_thread(
+            run_adx_llm_analyze,
+            appid=body.appid,
+            platform=body.platform,
+            end_date=body.end_date,
+            days=body.days,
+            persist=body.persist,
+        )
+    except RuntimeError as e:
+        raise HTTPException(503, str(e)) from e
+
+
 @app.post("/api/monetization/run")
 async def api_monetization_run(body: InsightInferBatchBody = InsightInferBatchBody()):
     """与 infer-batch 相同逻辑；便于旧客户端调用。"""
     result = await _insight_infer_async(body)
     return {"ok": True, **result}
+
+
+@app.post("/api/trend/report")
+async def api_trend_report(body: PlatformTrendReportBody):
+    """平台级玩法趋势分析报告（统计特征 + LLM 解读）。"""
+    from backend.adx_insights import run_platform_trend_report
+
+    try:
+        return await asyncio.to_thread(
+            run_platform_trend_report,
+            platform=body.platform,
+            end_date=body.end_date,
+            days=body.days,
+            persist=body.persist,
+        )
+    except RuntimeError as e:
+        raise HTTPException(503, str(e)) from e
+
+
+@app.get("/api/trend/report")
+def api_trend_report_get(
+    platform: str = Query("wx", pattern="^(wx|dy|yyb)$"),
+    date: str | None = Query(None, description="YYYY-MM-DD; omit for latest"),
+):
+    """读取已持久化的平台趋势报告（指定日期或最新）。"""
+    with db.get_conn() as conn:
+        if date:
+            row = conn.execute(
+                """
+                SELECT payload_json, report_date, model, created_at
+                FROM adx_llm_reports
+                WHERE scope_type = 'platform_trend' AND scope_key = ? AND report_date = ?
+                LIMIT 1
+                """,
+                (platform, date),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """
+                SELECT payload_json, report_date, model, created_at
+                FROM adx_llm_reports
+                WHERE scope_type = 'platform_trend' AND scope_key = ?
+                ORDER BY report_date DESC LIMIT 1
+                """,
+                (platform,),
+            ).fetchone()
+    if not row:
+        return {"ok": False, "report": None}
+    return {
+        "ok": True,
+        "report": {
+            "report_date": row["report_date"],
+            "model": row["model"],
+            "created_at": row["created_at"],
+            "data": json.loads(row["payload_json"]) if row["payload_json"] else None,
+        },
+    }
+
+
+@app.get("/api/trend/report/dates")
+def api_trend_report_dates(
+    platform: str = Query("wx", pattern="^(wx|dy|yyb)$"),
+):
+    """返回该平台已有趋势报告的日期列表。"""
+    with db.get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT report_date
+            FROM adx_llm_reports
+            WHERE scope_type = 'platform_trend' AND scope_key = ?
+            ORDER BY report_date DESC
+            """,
+            (platform,),
+        ).fetchall()
+    return {"dates": [r["report_date"] for r in rows]}
+
+
+@app.post("/api/qa")
+async def api_qa(body: QARequest):
+    """Run three-layer QA pipeline and return answer."""
+    from backend.qa import qa_pipeline
+
+    result = await asyncio.to_thread(
+        qa_pipeline,
+        question=body.question,
+        platform=body.platform,
+        date=body.date,
+    )
+    return result
+
+
+@app.get("/api/kb/index")
+async def api_kb_index():
+    """Trigger FAISS index build from data/kb/ directory."""
+    from backend.qa import index_kb
+
+    result = await asyncio.to_thread(index_kb)
+    return result
+
+
+@app.post("/api/adx/sync")
+async def api_adx_sync(body: AdxSyncBody = AdxSyncBody()):
+    """从同事站点 API 同步 ADX 素材。"""
+    from collector.adx_ingest import colleague_adx_configured, sync_from_colleague
+
+    if not colleague_adx_configured():
+        raise HTTPException(
+            400, "COLLEAGUE_ADX_URL not configured in .env"
+        )
+    result = await asyncio.to_thread(
+        sync_from_colleague,
+        dry_run=body.dry_run,
+        page_size=body.page_size,
+    )
+    return result
+
+
+@app.get("/api/adx/creatives")
+def api_adx_creatives_list(
+    platform: str | None = None,
+    grade: str | None = None,
+    search: str | None = None,
+    sort: str = Query("composite_score", pattern="^(composite_score|exposure_num|freshness|days_on_chart)$"),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """素材列表（可按平台、评级筛选，支持搜索和排序）。"""
+    clauses: list[str] = []
+    params: list[Any] = []
+    if platform:
+        # DB stores Chinese names like "微信小游戏" or short codes like "wx"
+        plat_map = {"wx": "微信小游戏", "dy": "抖音小游戏", "yyb": "应用宝小游戏"}
+        mapped = plat_map.get(platform)
+        if mapped:
+            clauses.append("(c.platform = ? OR c.platform = ?)")
+            params.extend([platform, mapped])
+        else:
+            clauses.append("c.platform = ?")
+            params.append(platform)
+    if grade:
+        clauses.append("c.grade = ?")
+        params.append(grade)
+    if search and search.strip():
+        needle = f"%{search.strip()}%"
+        clauses.append("(c.title LIKE ? OR c.product_name LIKE ?)")
+        params.extend([needle, needle])
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+
+    order_col = "c." + (sort if sort in ("composite_score", "exposure_num", "freshness", "days_on_chart") else "composite_score")
+
+    with db.get_conn() as conn:
+        total_row = conn.execute(
+            f"SELECT COUNT(*) AS cnt FROM adx_creatives c {where}", params
+        ).fetchone()
+        total = total_row["cnt"] if total_row else 0
+
+        rows = conn.execute(
+            f"""
+            SELECT c.creative_id, c.title, c.body_text, c.product_id, c.product_name,
+                   c.product_icon, c.platform, c.material_type, c.grade,
+                   c.composite_score, c.days_on_chart, c.rising_speed, c.accel_3d,
+                   c.material_num, c.creative_num, c.exposure_num,
+                   c.exposure_per_creative, c.media_spread, c.sustain_rate_7d,
+                   c.freshness, c.pic_list_json, c.video_list_json, c.fetched_at,
+                   m.appid AS mapped_appid
+            FROM adx_creatives c
+            LEFT JOIN adx_creative_game_map m ON m.creative_id = c.creative_id
+            {where}
+            ORDER BY {order_col} DESC NULLS LAST
+            LIMIT ? OFFSET ?
+            """,
+            (*params, limit, offset),
+        ).fetchall()
+
+    items = []
+    for r in rows:
+        item = dict(r)
+        item["pic_list"] = json.loads(item.pop("pic_list_json") or "[]")
+        item["video_list"] = json.loads(item.pop("video_list_json") or "[]")
+        items.append(item)
+    return {"items": items, "total": total}
+
+
+@app.get("/api/adx/creatives/{appid}")
+def api_adx_creatives_for_game(appid: str):
+    """查询某游戏关联的 ADX 素材。"""
+    with db.get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT c.creative_id, c.title, c.body_text,
+                   c.product_id, c.product_name, c.product_icon,
+                   c.platform, c.material_type, c.grade,
+                   c.composite_score, c.days_on_chart,
+                   c.rising_speed, c.accel_3d,
+                   c.material_num, c.creative_num,
+                   c.exposure_num, c.exposure_per_creative,
+                   c.media_spread, c.sustain_rate_7d, c.freshness,
+                   c.pic_list_json, c.video_list_json, c.fetched_at,
+                   m.appid AS mapped_appid
+            FROM adx_creative_game_map m
+            JOIN adx_creatives c ON c.creative_id = m.creative_id
+            WHERE m.appid = ?
+            ORDER BY c.composite_score DESC NULLS LAST
+            """,
+            (appid,),
+        ).fetchall()
+
+    items = []
+    for r in rows:
+        item = dict(r)
+        item["pic_list"] = json.loads(item.pop("pic_list_json") or "[]")
+        item["video_list"] = json.loads(item.pop("video_list_json") or "[]")
+        items.append(item)
+    return {"items": items}
 
 
 @app.post("/api/virality/upsert")

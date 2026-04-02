@@ -9,6 +9,7 @@ import { RouterLink, RouterView } from "vue-router";
       <RouterLink to="/genre" active-class="active">玩法洞察</RouterLink>
       <RouterLink to="/insights" active-class="active">大屏洞察</RouterLink>
       <RouterLink to="/qa" active-class="active">AI 问答</RouterLink>
+      <RouterLink to="/adx" active-class="active">ADX 素材</RouterLink>
     </nav>
     <RouterView />
   </div>

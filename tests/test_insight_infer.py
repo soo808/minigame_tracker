@@ -550,7 +550,7 @@ def test_api_game_insight_flags(tmp_path, monkeypatch):
             "SELECT id FROM gameplay_tags WHERE slug = ?",
             ("merge",),
         ).fetchone()[0]
-        for aid, rk in [("wx_tail", 60), ("wx_top_ok", 4)]:
+        for aid, rk in [("wx_tail", 101), ("wx_top_ok", 4)]:
             conn.execute(
                 """
                 INSERT INTO rankings (date, platform, chart, rank, appid)
@@ -603,3 +603,161 @@ def test_api_game_insight_flags(tmp_path, monkeypatch):
             assert jp["in_snapshot_top50_union"] is True
             assert jp["insight_surfaces_complete"] is True
             assert jp["show_ai_insight_button"] is False
+
+
+def test_chart_union_excludes_rank_beyond_chart_top_n(tmp_path, monkeypatch):
+    db_mod = _setup_db(tmp_path, monkeypatch)
+    _insert_game(db_mod, "wx_in100", "a", "x")
+    _insert_game(db_mod, "wx_out101", "b", "x")
+    from backend.analyzer import insight_infer
+
+    with db_mod.get_conn() as conn:
+        for chart in insight_infer.db_charts_for_platform("wx"):
+            conn.execute(
+                """
+                INSERT INTO rankings (date, platform, chart, rank, appid)
+                VALUES ('2026-06-01', 'wx', ?, 100, 'wx_in100')
+                """,
+                (chart,),
+            )
+            conn.execute(
+                """
+                INSERT INTO rankings (date, platform, chart, rank, appid)
+                VALUES ('2026-06-01', 'wx', ?, 101, 'wx_out101')
+                """,
+                (chart,),
+            )
+        rows = insight_infer._fetch_chart_union_candidates(
+            conn,
+            "wx",
+            "2026-06-01",
+            chart_top_n=100,
+            insight_gap_only=False,
+            limit=500,
+        )
+    assert {r["appid"] for r in rows} == {"wx_in100"}
+
+
+def test_schedule_auto_union_insight_once_for_nine_charts(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUTO_TOP50_INSIGHT_AFTER_COLLECT", "1")
+    db_mod = _setup_db(tmp_path, monkeypatch)
+    calls: list[str] = []
+
+    def fake_run(**kwargs: object) -> dict:
+        calls.append(str(kwargs.get("platform")))
+        return {
+            "candidates": 0,
+            "batches": 0,
+            "monetization_updated": 0,
+            "gameplay_links_added": 0,
+            "virality_inserted": 0,
+            "errors": [],
+        }
+
+    monkeypatch.setattr(
+        "backend.analyzer.insight_infer.run_insight_infer_batch", fake_run
+    )
+
+    class InstantThread:
+        def __init__(self, target=None, args=(), kwargs=None, daemon=None, name=None):
+            self._target = target
+
+        def start(self) -> None:
+            if self._target:
+                self._target()
+
+    monkeypatch.setattr(
+        "backend.analyzer.insight_infer.threading.Thread", InstantThread
+    )
+
+    from backend.analyzer import insight_infer
+    from backend.analyzer import status as st
+
+    date = "2026-05-01"
+    with db_mod.get_conn() as conn:
+        for plat, chart in st.REQUIRED_CHARTS | st.YYB_REQUIRED_CHARTS:
+            conn.execute(
+                """
+                INSERT INTO snapshots (date, platform, chart, fetched_at, status)
+                VALUES (?, ?, ?, datetime('now'), 'ok')
+                """,
+                (date, plat, chart),
+            )
+
+    insight_infer.schedule_auto_union_insight_if_ready(date)
+    assert calls == ["wx", "dy", "yyb"]
+    insight_infer.schedule_auto_union_insight_if_ready(date)
+    assert calls == ["wx", "dy", "yyb"]
+
+
+def test_schedule_auto_union_insight_skips_if_eight_charts(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUTO_TOP50_INSIGHT_AFTER_COLLECT", "1")
+    db_mod = _setup_db(tmp_path, monkeypatch)
+    calls: list[str] = []
+
+    def fake_run(**kwargs: object) -> dict:
+        calls.append(str(kwargs.get("platform")))
+        return {
+            "candidates": 0,
+            "batches": 0,
+            "monetization_updated": 0,
+            "gameplay_links_added": 0,
+            "virality_inserted": 0,
+            "errors": [],
+        }
+
+    monkeypatch.setattr(
+        "backend.analyzer.insight_infer.run_insight_infer_batch", fake_run
+    )
+
+    class InstantThread:
+        def __init__(self, target=None, args=(), kwargs=None, daemon=None, name=None):
+            self._target = target
+
+        def start(self) -> None:
+            if self._target:
+                self._target()
+
+    monkeypatch.setattr(
+        "backend.analyzer.insight_infer.threading.Thread", InstantThread
+    )
+
+    from backend.analyzer import insight_infer
+    from backend.analyzer import status as st
+
+    date = "2026-05-02"
+    eight = list(st.REQUIRED_CHARTS | st.YYB_REQUIRED_CHARTS)[:8]
+    with db_mod.get_conn() as conn:
+        for plat, chart in eight:
+            conn.execute(
+                """
+                INSERT INTO snapshots (date, platform, chart, fetched_at, status)
+                VALUES (?, ?, ?, datetime('now'), 'ok')
+                """,
+                (date, plat, chart),
+            )
+
+    insight_infer.schedule_auto_union_insight_if_ready(date)
+    assert calls == []
+
+
+def test_adx_summary_endpoint(api_client):
+    r = api_client.get("/api/adx/summary", params={"platform": "wx", "days": 30})
+    assert r.status_code == 200
+    j = r.json()
+    assert "genre_trend" in j
+    assert j["genre_trend"].get("by_date") == []
+
+
+def test_adx_insights_analyze_no_llm(api_client, monkeypatch):
+    monkeypatch.setattr("backend.adx_insights.has_llm_for_chat", lambda: False)
+    r = api_client.post(
+        "/api/adx/insights/analyze",
+        json={
+            "appid": "wx_api",
+            "platform": "wx",
+            "days": 30,
+            "persist": False,
+        },
+    )
+    assert r.status_code == 503

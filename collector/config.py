@@ -43,6 +43,9 @@ YYB_PROXY_URL: str | None = os.getenv("YYB_PROXY_URL", None) or None
 
 YYB_API_URL = "https://yybadaccess.3g.qq.com/v2/dc_pcyyb_official"
 
+# ── ADX 素材同步（同事站点 API） ──────────────────────────────────────────────
+COLLEAGUE_ADX_URL: str = os.getenv("COLLEAGUE_ADX_URL", "").strip()
+
 YYB_CHARTS: list[dict] = [
     {
         "chart_id": "popular",

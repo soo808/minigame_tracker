@@ -35,6 +35,91 @@ interface InsightsPayload {
 
 const payload = ref<InsightsPayload | null>(null);
 
+/* ── Trend report ── */
+interface TrendReport {
+  report_date: string;
+  model: string;
+  created_at: string;
+  data: {
+    daily_highlights?: string[];
+    comparison?: string;
+    platform_summary?: string;
+    rising_genres?: string[];
+    falling_genres?: string[];
+    hot_games?: string[];
+    predictions?: string[];
+    recommendations?: string[];
+    risk_signals?: string[];
+  } | null;
+}
+const trendReport = ref<TrendReport | null>(null);
+const trendLoading = ref(false);
+const trendGenerating = ref(false);
+const trendDates = ref<string[]>([]);
+const trendDate = ref<string | null>(null);
+
+async function loadTrendDates() {
+  try {
+    const u = new URL(apiUrl("trend/report/dates"));
+    u.searchParams.set("platform", platform.value);
+    const res = await fetch(u.href);
+    if (res.ok) {
+      const data = await res.json();
+      trendDates.value = data.dates || [];
+      if (!trendDate.value && trendDates.value.length) {
+        trendDate.value = trendDates.value[0];
+      }
+    }
+  } catch {
+    trendDates.value = [];
+  }
+}
+
+async function loadTrendReport() {
+  trendLoading.value = true;
+  try {
+    const u = new URL(apiUrl("trend/report"));
+    u.searchParams.set("platform", platform.value);
+    if (trendDate.value) u.searchParams.set("date", trendDate.value);
+    const res = await fetch(u.href);
+    if (res.ok) {
+      const data = await res.json();
+      trendReport.value = data.ok ? data.report : null;
+    }
+  } catch {
+    trendReport.value = null;
+  } finally {
+    trendLoading.value = false;
+  }
+}
+
+async function generateTrendReport() {
+  trendGenerating.value = true;
+  try {
+    const body: Record<string, unknown> = { platform: platform.value, persist: true };
+    if (selectedDate.value) body.end_date = selectedDate.value;
+    const res = await fetch(apiUrl("trend/report"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (res.ok) {
+      await loadTrendDates();
+      if (selectedDate.value && !trendDates.value.includes(selectedDate.value)) {
+        // Newly generated; refresh list
+      }
+      if (selectedDate.value) trendDate.value = selectedDate.value;
+      await loadTrendReport();
+    }
+  } catch {
+    /* ignore */
+  } finally {
+    trendGenerating.value = false;
+  }
+}
+
+watch(trendDate, () => loadTrendReport());
+
 const genreChartEl = ref<HTMLDivElement | null>(null);
 const tagChartEl = ref<HTMLDivElement | null>(null);
 let genreChart: echarts.ECharts | null = null;
@@ -148,8 +233,11 @@ watch(payload, () => {
 
 watch(platform, async () => {
   selectedDate.value = null;
+  trendDate.value = null;
   await loadDates();
   await loadInsights();
+  await loadTrendDates();
+  await loadTrendReport();
 });
 
 watch(selectedDate, () => loadInsights());
@@ -162,6 +250,8 @@ function onResize() {
 onMounted(async () => {
   await loadDates();
   await loadInsights();
+  await loadTrendDates();
+  await loadTrendReport();
   window.addEventListener("resize", onResize);
 });
 
@@ -267,6 +357,102 @@ onBeforeUnmount(() => {
       </div>
     </template>
     <p v-else-if="!loading" class="empty-page">暂无数据。请先完成榜单采集。</p>
+
+    <!-- ── Trend Report ── -->
+    <section class="card trend-card" style="margin-top: 16px">
+      <div class="trend-header">
+        <h2>
+          玩法趋势预测
+          <span v-if="trendLoading" class="muted" style="font-weight: 400; font-size: 13px"
+            >加载中…</span
+          >
+        </h2>
+        <div class="trend-date-row">
+          <label v-if="trendDates.length">
+            报告日期
+            <select v-model="trendDate">
+              <option v-for="d in trendDates" :key="d" :value="d">{{ d }}</option>
+            </select>
+          </label>
+          <button
+            type="button"
+            class="btn-trend"
+            :disabled="trendGenerating"
+            @click="generateTrendReport"
+          >
+            {{ trendGenerating ? "生成中…（约 30 秒）" : "生成/刷新报告" }}
+          </button>
+        </div>
+      </div>
+      <template v-if="trendReport && trendReport.data">
+        <!-- Daily Highlights -->
+        <div v-if="trendReport.data.daily_highlights?.length" class="trend-highlights">
+          <h3>今日要点</h3>
+          <ul class="highlight-list">
+            <li v-for="(h, i) in trendReport.data.daily_highlights" :key="i">{{ h }}</li>
+          </ul>
+        </div>
+
+        <!-- Comparison -->
+        <p v-if="trendReport.data.comparison" class="trend-comparison">
+          {{ trendReport.data.comparison }}
+        </p>
+
+        <!-- Summary -->
+        <p v-if="trendReport.data.platform_summary" class="trend-summary">
+          {{ trendReport.data.platform_summary }}
+        </p>
+
+        <div class="trend-grid">
+          <div v-if="trendReport.data.rising_genres?.length">
+            <h3>上升品类</h3>
+            <ul>
+              <li v-for="(r, i) in trendReport.data.rising_genres" :key="i">{{ r }}</li>
+            </ul>
+          </div>
+          <div v-if="trendReport.data.falling_genres?.length">
+            <h3>下降品类</h3>
+            <ul>
+              <li v-for="(f, i) in trendReport.data.falling_genres" :key="i">{{ f }}</li>
+            </ul>
+          </div>
+          <div v-if="trendReport.data.hot_games?.length">
+            <h3>值得关注</h3>
+            <ul>
+              <li v-for="(h, i) in trendReport.data.hot_games" :key="i">{{ h }}</li>
+            </ul>
+          </div>
+          <div v-if="trendReport.data.predictions?.length">
+            <h3>趋势预测</h3>
+            <ul>
+              <li v-for="(p, i) in trendReport.data.predictions" :key="i">{{ p }}</li>
+            </ul>
+          </div>
+          <div v-if="trendReport.data.recommendations?.length">
+            <h3>投放建议</h3>
+            <ul>
+              <li v-for="(r, i) in trendReport.data.recommendations" :key="i">{{ r }}</li>
+            </ul>
+          </div>
+          <div v-if="trendReport.data.risk_signals?.length">
+            <h3>风险信号</h3>
+            <ul>
+              <li v-for="(s, i) in trendReport.data.risk_signals" :key="i">{{ s }}</li>
+            </ul>
+          </div>
+        </div>
+        <p class="trend-meta">
+          报告日期: {{ trendReport.report_date }} | 模型: {{ trendReport.model }} |
+          {{ trendReport.created_at }}
+        </p>
+      </template>
+      <div v-else-if="!trendLoading && !trendDates.length">
+        <p class="muted">暂无趋势报告。点击上方按钮使用本地 AI 生成。</p>
+      </div>
+      <div v-else-if="!trendLoading && !trendReport">
+        <p class="muted">该日期暂无报告。点击上方按钮生成。</p>
+      </div>
+    </section>
   </div>
 </template>
 
@@ -472,6 +658,124 @@ h1 {
   color: #64748b;
   font-size: 14px;
   padding: 40px 0;
+}
+
+/* ── Trend Report ── */
+.trend-card {
+  grid-column: 1 / -1;
+  min-height: auto;
+}
+.trend-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.trend-header h2 { margin: 0; }
+.trend-date-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.trend-date-row label {
+  font-size: 13px;
+  color: #475569;
+  font-weight: 500;
+}
+.trend-date-row select {
+  margin-left: 6px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  color: #0f172a;
+  font-size: 13px;
+}
+.trend-highlights {
+  margin-bottom: 14px;
+  padding: 14px;
+  background: #f0f9ff;
+  border: 1px solid #bae6fd;
+  border-radius: 8px;
+}
+.trend-highlights h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #0369a1;
+}
+.highlight-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+  color: #0c4a6e;
+  line-height: 1.6;
+}
+.highlight-list li {
+  margin-bottom: 4px;
+}
+.trend-comparison {
+  font-size: 13px;
+  color: #475569;
+  line-height: 1.6;
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  background: #f8fafc;
+  border-left: 3px solid #2563eb;
+  border-radius: 0 6px 6px 0;
+}
+.trend-summary {
+  font-size: 14px;
+  color: #334155;
+  line-height: 1.7;
+  margin: 0 0 16px;
+}
+.trend-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+.trend-grid h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #475569;
+}
+.trend-grid ul {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+  color: #334155;
+}
+.trend-grid li {
+  margin-bottom: 6px;
+  line-height: 1.5;
+}
+.trend-meta {
+  margin: 16px 0 0;
+  font-size: 11px;
+  color: #94a3b8;
+}
+.btn-trend {
+  margin-top: 12px;
+  padding: 10px 20px;
+  border-radius: 8px;
+  border: 1px solid #2563eb;
+  background: #2563eb;
+  color: #fff;
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+}
+.btn-trend:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.btn-trend:not(:disabled):hover {
+  background: #1d4ed8;
 }
 
 @media (max-width: 1200px) {

@@ -3,6 +3,7 @@ import * as echarts from "echarts";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { apiUrl } from "../config";
 import { resolveIconSrc } from "../iconSrc";
+import CreativeModal from "./CreativeModal.vue";
 
 type PeerRow = {
   appid: string;
@@ -39,6 +40,32 @@ type ViralityRow = {
   source: string;
 };
 
+type AdxCreative = {
+  creative_id: string;
+  title: string | null;
+  body_text: string | null;
+  product_id: string | null;
+  product_name: string | null;
+  product_icon: string | null;
+  platform: string | null;
+  material_type: string | null;
+  grade: string | null;
+  composite_score: number | null;
+  exposure_num: number | null;
+  exposure_per_creative: number | null;
+  days_on_chart: number | null;
+  rising_speed: number | null;
+  accel_3d: number | null;
+  material_num: number | null;
+  creative_num: number | null;
+  media_spread: number | null;
+  sustain_rate_7d: number | null;
+  freshness: number | null;
+  pic_list: string[];
+  video_list: string[];
+  fetched_at: string | null;
+};
+
 const props = defineProps<{
   appid: string | null;
   platform: "wx" | "dy" | "yyb";
@@ -73,6 +100,8 @@ const sameGenrePeers = ref<Record<string, PeerRow[]>>({});
 const gameplayTags = ref<GameplayRow[]>([]);
 const monetization = ref<MonetizationRow | null>(null);
 const viralityAssumptions = ref<ViralityRow[]>([]);
+const adxCreatives = ref<AdxCreative[]>([]);
+const selectedAdxCreative = ref<AdxCreative | null>(null);
 
 const insightLoading = ref(false);
 const insightNote = ref("");
@@ -120,6 +149,19 @@ async function load() {
       ? data.show_ai_insight_button
       : true;
   renderChart();
+
+  // Load ADX creatives for this game
+  try {
+    const adxRes = await fetch(apiUrl(`adx/creatives/${props.appid}`));
+    if (adxRes.ok) {
+      const adxData = await adxRes.json();
+      adxCreatives.value = adxData.items || [];
+    } else {
+      adxCreatives.value = [];
+    }
+  } catch {
+    adxCreatives.value = [];
+  }
 }
 
 async function runInsightInfer() {
@@ -234,6 +276,13 @@ function monetizationLabel(m: string): string {
   return map[m] || m;
 }
 
+function formatNum(n: number | null | undefined): string {
+  if (n == null) return "—";
+  if (n >= 1_0000_0000) return (n / 1_0000_0000).toFixed(1) + "亿";
+  if (n >= 1_0000) return (n / 1_0000).toFixed(1) + "万";
+  return String(n);
+}
+
 onMounted(load);
 watch(
   () => [props.appid, props.platform, props.asOfDate],
@@ -330,6 +379,45 @@ onBeforeUnmount(() => {
         <p v-else class="muted">暂无传播假设记录。</p>
       </section>
 
+      <section v-if="adxCreatives.length" class="insight-block">
+        <p class="section-title">
+          ADX 素材
+          <span class="adx-badge">{{ adxCreatives.length }}</span>
+        </p>
+        <div class="adx-grid">
+          <div
+            v-for="c in adxCreatives"
+            :key="c.creative_id"
+            class="adx-card adx-clickable"
+            @click="selectedAdxCreative = c"
+          >
+            <img
+              v-if="c.pic_list && c.pic_list.length"
+              :src="c.pic_list[0]"
+              class="adx-thumb"
+              alt=""
+            />
+            <div v-else class="adx-thumb adx-ph" />
+            <div class="adx-info">
+              <p class="adx-title">{{ c.title || "无标题" }}</p>
+              <p v-if="c.body_text" class="adx-body">{{ c.body_text }}</p>
+              <p class="adx-meta">
+                <span v-if="c.grade" class="adx-grade" :class="'g-' + c.grade">{{ c.grade }}</span>
+                <span v-if="c.exposure_num != null">曝光 {{ formatNum(c.exposure_num) }}</span>
+                <span v-if="c.material_type">{{ c.material_type }}</span>
+                <span v-if="c.video_list && c.video_list.length" class="adx-video-flag">含视频</span>
+              </p>
+              <p class="adx-metrics-row">
+                <span v-if="c.composite_score != null">综合分 {{ c.composite_score.toFixed(1) }}</span>
+                <span v-if="c.material_num != null">素材 {{ c.material_num }}</span>
+                <span v-if="c.creative_num != null">创意 {{ c.creative_num }}</span>
+                <span v-if="c.days_on_chart != null">在榜 {{ c.days_on_chart }}天</span>
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section class="insight-block">
         <p class="section-title">同榜同类（{{ snapshotDate || "—" }}）</p>
         <p v-if="!genreMajor" class="muted">当前游戏未标注大类，无法匹配同榜同类。</p>
@@ -367,6 +455,13 @@ onBeforeUnmount(() => {
       <p class="section-title">近 30 日排名走势</p>
       <div ref="chartEl" class="chart" />
     </div>
+
+    <!-- ADX Creative detail modal (nested) -->
+    <CreativeModal
+      :creative="selectedAdxCreative"
+      @close="selectedAdxCreative = null"
+      @pick-game="(id: string) => { selectedAdxCreative = null; emit('pick', id); }"
+    />
   </div>
 </template>
 
@@ -616,5 +711,116 @@ h2 {
 .chart {
   width: 100%;
   height: 320px;
+}
+
+/* ── ADX Creatives ── */
+.adx-badge {
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  background: #fef3c7;
+  color: #92400e;
+  font-weight: 700;
+  margin-left: 4px;
+}
+.adx-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+.adx-card {
+  display: flex;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  background: #fafafa;
+}
+.adx-clickable {
+  cursor: pointer;
+  transition: box-shadow 0.15s, border-color 0.15s;
+}
+.adx-clickable:hover {
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
+  border-color: #cbd5e1;
+}
+.adx-thumb {
+  width: 72px;
+  height: 72px;
+  border-radius: 6px;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+.adx-ph {
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+}
+.adx-info {
+  min-width: 0;
+  flex: 1;
+}
+.adx-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: #0f172a;
+  line-height: 1.4;
+}
+.adx-body {
+  margin: 3px 0 0;
+  font-size: 11px;
+  color: #64748b;
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.adx-meta {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: #64748b;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.adx-grade {
+  font-weight: 700;
+  padding: 0 4px;
+  border-radius: 3px;
+}
+.adx-grade.g-S {
+  color: #b45309;
+  background: #fef3c7;
+}
+.adx-grade.g-A {
+  color: #1d4ed8;
+  background: #dbeafe;
+}
+.adx-grade.g-B {
+  color: #475569;
+  background: #f1f5f9;
+}
+.adx-video-flag {
+  font-size: 10px;
+  color: #dc2626;
+  padding: 1px 5px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 4px;
+  font-weight: 600;
+}
+.adx-metrics-row {
+  margin: 3px 0 0;
+  font-size: 11px;
+  color: #94a3b8;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.adx-score {
+  margin: 2px 0 0;
+  font-size: 10px;
+  color: #94a3b8;
 }
 </style>
