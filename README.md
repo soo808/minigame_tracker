@@ -1,6 +1,10 @@
 # 🎮 小游戏榜单洞察平台 · minigame_tracker
 
 > **用自建的三平台榜单监控 + 四大分析引擎，帮助投放部门在一个看板内完成「发现竞品 → 理解玩法 → 查看素材 → 判断投放价值」的完整闭环。**
+> <img width="1380" height="940" alt="img_v3_0210v_d238abd2-094f-475f-96d2-529b4708623g" src="https://github.com/user-attachments/assets/742d2d09-1866-4f14-b517-48e4d258d5c5" />
+> <img width="1189" height="932" alt="img_v3_0210v_ae68ac0f-7952-413b-a9ca-a955cba7726g" src="https://github.com/user-attachments/assets/33eec6be-ee38-4f37-ac30-501732a0d855" />
+
+
 
 ---
 
